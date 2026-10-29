@@ -6,6 +6,9 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
 ## Unveröffentlicht
 
+### Hinzugefügt
+- [D][6] PTR auffüllen: Fehlen Reverse-Zonen, fragt das Script, ob sie gleich angelegt werden sollen. Auswahl je Netz (Vorschlag /24, `(alle)` möglich, auf /16 oder /8 anpassbar); danach werden die PTR-Einträge für die neuen Zonen automatisch geplant und nach Bestätigung erstellt. Zonen und Einträge lassen sich mit Rückgängig entfernen.
+
 ### Behoben
 - [D][6] PTR auffüllen: PTR-Einträge zeigen immer auf den vollständigen Namen (`gc._msdcs.lutefisk.local.` statt `gc._msdcs.`), auch in der Liste „Keine passende Reverse-Zone“. Dienst-Namen wie `gc._msdcs` oder `_ldap._tcp` werden kein PTR-Ziel; IPs mit nur Dienst-Namen stehen separat. Die Namen aus allen gewählten Zonen werden gemeinsam sortiert (echte Hostnamen zuerst).
 - [D][5] Automatischer PTR: Namen mit Punkt (z. B. `srv01.sub`) bekommen jetzt ebenfalls den vollständigen Namen.

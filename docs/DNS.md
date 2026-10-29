@@ -116,8 +116,27 @@ z. B. `dc01.lutefisk.local.`.
 Dienst-Namen (ein Namensteil beginnt mit `_`, z. B. `gc._msdcs`, `_ldap._tcp`) werden nie
 PTR-Ziel. Hat eine IP nur solche Namen, steht sie grau unter „Nur Dienst-Namen - kein PTR“.
 
-Erst Vorschau-Liste, dann Bestätigung. Adressen ohne passende Reverse-Zone werden gesammelt
-gemeldet (mit vollständigem Namen).
+Adressen ohne passende Reverse-Zone werden gesammelt gemeldet (mit vollständigem Namen).
+Ist `$Funktionen.DnsZonen` an, fragt das Script „Passende Reverse-Zone(n) jetzt erstellen?“:
+
+1. Auswahl der Netze (Vorschlag /24), mehrere möglich, `(alle)` = alle Netze:
+   ```
+     [  1] (alle)
+     [  2] 192.168.8.0/24     ->  8.168.192.in-addr.arpa     (2 Adressen: dc01.lutefisk.local., dc02.lutefisk.local.)
+     [  3] 192.168.9.0/24     ->  9.168.192.in-addr.arpa     (1 Adresse: srv01.lutefisk.local.)
+   ```
+2. Optional „Netze anpassen (z. B. /16 statt /24)?“ – pro Netz ein anderes Netz eingeben
+   (`/8`, `/16`, `/24`; alle Adressen müssen darin liegen, `-` = Netz weglassen). Gleiche Zonen
+   werden nur einmal angelegt.
+3. AD-Integration und dynamische Updates wie unter [4], Vorschau, dann werden die Zonen angelegt.
+4. Danach sucht das Script neu – die PTR-Einträge für die neuen Zonen stehen sofort in der Liste.
+
+IPv6-Adressen ohne Reverse-Zone erscheinen nur als Hinweis (Zone von Hand anlegen). Bei Nein
+oder leerer Auswahl geht es nur mit den Adressen weiter, die schon eine Reverse-Zone haben.
+
+Zum Schluss die Liste der fehlenden PTR-Einträge und „Diese PTR-Einträge jetzt erstellen?“.
+Neue Zonen und PTR-Einträge stehen im Protokoll; [8] Rückgängig entfernt zuerst die Einträge,
+dann die leeren Zonen.
 
 ## [7] Weiterleitungen
 

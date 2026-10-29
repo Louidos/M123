@@ -11,6 +11,8 @@ function global:Remove-DnsServerResourceRecord { [CmdletBinding()] param([string
 function global:Get-DnsServerZone { [CmdletBinding()] param([string]$Name, [string]$ComputerName) }
 function global:Remove-DnsServerZone { [CmdletBinding()] param([string]$Name, [switch]$Force, [string]$ComputerName) }
 function global:Get-DnsServerSetting { [CmdletBinding()] param([string]$ComputerName) }
+function global:Add-DnsServerPrimaryZone { [CmdletBinding()] param([string]$Name, [string]$NetworkId, [string]$DynamicUpdate, [string]$ReplicationScope, [string]$ZoneFile, [string]$ComputerName) }
+function global:Add-DnsServerResourceRecordPtr { [CmdletBinding()] param([string]$ZoneName, [string]$Name, [string]$PtrDomainName, $TimeToLive, [string]$ComputerName) }
 if (-not (Get-Command Get-ADDomain -ErrorAction SilentlyContinue))       { function global:Get-ADDomain { [CmdletBinding()] param() } }
 if (-not (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) { function global:Get-WindowsFeature { [CmdletBinding()] param([string[]]$Name) } }
 
@@ -195,6 +197,63 @@ Describe 'Select-DnsPtrKandidaten' {
         $r2 = Select-DnsPtrKandidaten @((& $k 'lutefisk.local' 'gc._msdcs' '192.168.10.10'), (& $k 'lutefisk.local' '@' '192.168.10.10')) @('10.168.192.in-addr.arpa')
         $r2.MitZone[0].Fqdn | Should BeExactly 'lutefisk.local.'
         @($r2.NurDienst).Count | Should Be 0
+    }
+}
+
+Describe 'Group-DnsOhneZoneNachNetz' {
+    $o = {
+        param($Ip, $Fqdn)
+        $z = Get-PtrZielFuerIp $Ip @()
+        [pscustomobject]@{ Ip = $Ip; Fqdn = $Fqdn; VorschlagNetz = $z.VorschlagNetz; VorschlagZone = $z.VorschlagZone }
+    }
+    $ohne = @(
+        (& $o '192.168.122.243' 'kvm.lutefisk.local.')
+        (& $o '192.168.8.10'    'dc01.lutefisk.local.')
+        (& $o '192.168.8.11'    'dc02.lutefisk.local.')
+        (& $o '192.168.9.10'    'srv01.lutefisk.local.')
+        (& $o '192.168.11.200'  'drucker.lutefisk.local.')
+        (& $o 'fd00::5'         'srv6.lutefisk.local.')
+    )
+    $netze = @(Group-DnsOhneZoneNachNetz $ohne)
+
+    It 'bildet je /24-Netz eine Zeile, sortiert nach Netz, ohne IPv6' {
+        (@($netze | ForEach-Object { $_.Netz }) -join ',') | Should Be '192.168.8.0/24,192.168.9.0/24,192.168.11.0/24,192.168.122.0/24'
+    }
+    It 'nennt Zone, Anzahl und Namen in der Anzeige' {
+        $netze[0].Zone | Should Be '8.168.192.in-addr.arpa'
+        @($netze[0].Adressen).Count | Should Be 2
+        $netze[0].Anzeige | Should Match '^192\.168\.8\.0/24\s+->\s+8\.168\.192\.in-addr\.arpa\s+\(2 Adressen: dc01\.lutefisk\.local\., dc02\.lutefisk\.local\.\)$'
+        $netze[1].Anzeige | Should Match '\(1 Adresse: srv01\.lutefisk\.local\.\)$'
+    }
+    It 'ist leer, wenn nur IPv6 oder nichts übrig ist' {
+        @(Group-DnsOhneZoneNachNetz @($ohne[5])).Count | Should Be 0
+        @(Group-DnsOhneZoneNachNetz @()).Count | Should Be 0
+    }
+}
+
+Describe 'Get-DnsFehlendePtr' {
+    Mock Get-DnsServerResourceRecord {
+        @((New-TestRecord 'dc01' 'A' @{ IPv4Address = '192.168.10.10' }), (New-TestRecord 'gc._msdcs' 'A' @{ IPv4Address = '192.168.10.10' }),
+          (New-TestRecord 'srv01' 'A' @{ IPv4Address = '192.168.10.20' }), (New-TestRecord 'srv02' 'A' @{ IPv4Address = '192.168.8.10' }))
+    } -ParameterFilter { $ZoneName -eq 'lutefisk.local' -and $RRType -eq 'A' }
+    Mock Get-DnsServerResourceRecord { } -ParameterFilter { $ZoneName -eq 'lutefisk.local' -and $RRType -eq 'AAAA' }
+    Mock Get-DnsServerResourceRecord { New-TestRecord '20' 'PTR' @{ PtrDomainName = 'srv01.lutefisk.local.' } } -ParameterFilter { $ZoneName -eq '10.168.192.in-addr.arpa' -and $Name -eq '20' }
+    Mock Get-DnsServerResourceRecord { } -ParameterFilter { $ZoneName -eq '10.168.192.in-addr.arpa' -and $Name -eq '10' }
+    Mock Get-DnsServerResourceRecord { } -ParameterFilter { $ZoneName -eq '8.168.192.in-addr.arpa' }
+
+    It 'plant nur fehlende PTR-Einträge und meldet Adressen ohne Zone' {
+        $r = Get-DnsFehlendePtr -Zonen @('lutefisk.local') -ReverseZonen @('10.168.192.in-addr.arpa')
+        @($r.Plaene).Count | Should Be 1
+        $r.Plaene[0].Zone | Should Be '10.168.192.in-addr.arpa'
+        $r.Plaene[0].Name | Should Be '10'
+        $r.Plaene[0].Daten | Should BeExactly 'dc01.lutefisk.local.'
+        @($r.OhneZone).Count | Should Be 1
+        $r.OhneZone[0].Fqdn | Should BeExactly 'srv02.lutefisk.local.'
+    }
+    It 'plant nach dem Anlegen der Zone den PTR für die neue Zone mit' {
+        $r = Get-DnsFehlendePtr -Zonen @('lutefisk.local') -ReverseZonen @('10.168.192.in-addr.arpa', '8.168.192.in-addr.arpa')
+        (@($r.Plaene | ForEach-Object { "$($_.Zone)|$($_.Name)|$($_.Daten)" }) -join ',') | Should Be '10.168.192.in-addr.arpa|10|dc01.lutefisk.local.,8.168.192.in-addr.arpa|10|srv02.lutefisk.local.'
+        @($r.OhneZone).Count | Should Be 0
     }
 }
 
@@ -422,5 +481,64 @@ Describe 'Start-Rueckgaengig mit DNS-Einträgen' {
     }
     It 'meldet die DNS-Einträge als ENTFERNT' {
         @($script:Ergebnisse | Where-Object { $_.Typ -eq 'DNS-Eintrag' -and $_.Status -eq 'ENTFERNT' }).Count | Should Be 3
+    }
+}
+
+Describe 'Start-DnsPtrAuffuellen legt fehlende Reverse-Zonen an' {
+    $Funktionen           = @{ Protokoll = $false; DnsZonen = $true; Vorschau = $true }
+    $script:Ergebnisse    = [System.Collections.Generic.List[object]]::new()
+    $script:GuiVerfuegbar = $false
+    $script:Faehig        = @{ AD = $false; DNS = $true; DnsEntfernt = $false; Grund = @{} }
+    $global:TestReverseZonen = [System.Collections.Generic.List[string]]::new()
+
+    Mock Get-DnsZonen { [pscustomobject]@{ ZoneName = 'lutefisk.local' } } -ParameterFilter { $Forward }
+    Mock Get-DnsZonen { @($global:TestReverseZonen | ForEach-Object { [pscustomobject]@{ ZoneName = $_ } }) } -ParameterFilter { $Reverse }
+    Mock Get-DnsServerResourceRecord {
+        @((New-TestRecord 'dc01' 'A' @{ IPv4Address = '192.168.8.10' }), (New-TestRecord 'gc._msdcs' 'A' @{ IPv4Address = '192.168.8.10' }),
+          (New-TestRecord 'srv01' 'A' @{ IPv4Address = '192.168.9.10' }), (New-TestRecord 'srv02' 'A' @{ IPv4Address = '192.168.11.200' }),
+          (New-TestRecord 'kvm' 'A' @{ IPv4Address = '192.168.122.243' }))
+    } -ParameterFilter { $ZoneName -eq 'lutefisk.local' -and $RRType -eq 'A' }
+    Mock Get-DnsServerZone { }
+    Mock Add-DnsServerPrimaryZone { $global:TestReverseZonen.Add(((ConvertTo-ReverseZonenName $NetworkId).Zone)) }
+    Mock Add-DnsServerResourceRecordPtr { }
+    Mock Read-Host { '' }
+    Mock Read-Host { '1' } -ParameterFilter { $Prompt -like '*Nummer*' }    # (alle Forward-Zonen) und (alle) Netze
+
+    Start-DnsPtrAuffuellen
+
+    It 'legt für alle vier Netze eine Reverse-Zone an' {
+        Assert-MockCalled Add-DnsServerPrimaryZone -Times 4 -Exactly -Scope Describe
+        ($global:TestReverseZonen -join ',') | Should Be '8.168.192.in-addr.arpa,9.168.192.in-addr.arpa,11.168.192.in-addr.arpa,122.168.192.in-addr.arpa'
+    }
+    It 'plant danach ohne weiteren Aufruf die PTR-Einträge mit vollständigem Namen und legt sie an' {
+        Assert-MockCalled Add-DnsServerResourceRecordPtr -Times 4 -Exactly -Scope Describe
+        Assert-MockCalled Add-DnsServerResourceRecordPtr -Times 1 -Exactly -Scope Describe -ParameterFilter { $ZoneName -eq '8.168.192.in-addr.arpa' -and $Name -eq '10' -and $PtrDomainName -eq 'dc01.lutefisk.local.' }
+        Assert-MockCalled Add-DnsServerResourceRecordPtr -Times 0 -Exactly -Scope Describe -ParameterFilter { $PtrDomainName -like '*_msdcs*' }
+    }
+    It 'protokolliert Zonen und Einträge für Rückgängig' {
+        @($script:Ergebnisse | Where-Object { $_.Typ -eq 'DNS-Zone' -and $_.Status -eq 'OK' -and $_.Bezug -eq 'Reverse' }).Count | Should Be 4
+        @($script:Ergebnisse | Where-Object { $_.Typ -eq 'DNS-Eintrag' -and $_.Status -eq 'OK' -and $_.Bezug -like 'PTR|*' }).Count | Should Be 4
+    }
+}
+
+Describe 'Start-DnsPtrAuffuellen ohne neue Reverse-Zonen' {
+    $Funktionen           = @{ Protokoll = $false; DnsZonen = $true; Vorschau = $true }
+    $script:Ergebnisse    = [System.Collections.Generic.List[object]]::new()
+    $script:GuiVerfuegbar = $false
+    $script:Faehig        = @{ AD = $false; DNS = $true; DnsEntfernt = $false; Grund = @{} }
+
+    Mock Get-DnsZonen { [pscustomobject]@{ ZoneName = 'lutefisk.local' } } -ParameterFilter { $Forward }
+    Mock Get-DnsZonen { } -ParameterFilter { $Reverse }
+    Mock Get-DnsServerResourceRecord { New-TestRecord 'dc01' 'A' @{ IPv4Address = '192.168.8.10' } } -ParameterFilter { $ZoneName -eq 'lutefisk.local' -and $RRType -eq 'A' }
+    Mock Add-DnsServerPrimaryZone { }
+    Mock Add-DnsServerResourceRecordPtr { }
+    Mock Read-Host { '' }
+    Mock Read-Host { '1' } -ParameterFilter { $Prompt -like '*Nummer*' }
+    Mock Read-Host { 'n' } -ParameterFilter { $Prompt -like '*Reverse-Zone(n) jetzt erstellen*' }
+
+    It 'kehrt bei Nein ohne Fehler zurück und legt nichts an' {
+        { Start-DnsPtrAuffuellen } | Should Not Throw
+        Assert-MockCalled Add-DnsServerPrimaryZone -Times 0 -Exactly -Scope It
+        Assert-MockCalled Add-DnsServerResourceRecordPtr -Times 0 -Exactly -Scope It
     }
 }
