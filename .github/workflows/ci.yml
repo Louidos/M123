@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Syntax und Pester (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pester 3.4/4.x bereitstellen
+        shell: powershell
+        run: |
+          $p = Get-Module Pester -ListAvailable | Where-Object { $_.Version.Major -lt 5 }
+          if ($p) { $p | Select-Object Name, Version, ModuleBase | Format-Table -AutoSize | Out-String | Write-Host }
+          else {
+            Write-Host 'Kein Pester < 5 vorhanden - installiere 4.10.1 (nur für CI).'
+            Install-Module Pester -RequiredVersion 4.10.1 -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+
+      - name: Syntax prüfen und Tests ausführen
+        shell: powershell
+        run: ./scripts/Run-Tests.ps1

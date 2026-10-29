@@ -1,0 +1,22 @@
+# Protokolle und Passwortlisten der AD-Schnellanlage – nie committen
+AD-Schnellanlage-Protokolle/
+Passwoerter_*.csv
+AD-Anlage_*.csv
+
+# Persönliche Einstellungen (Beispiel liegt in config/)
+Einstellungen.json
+
+# Geheimnisse
+.env
+*.pfx
+*.key
+
+# Testergebnisse
+TestResults*.xml
+testResults.xml
+
+# Editor / System
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
