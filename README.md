@@ -11,7 +11,9 @@ CSV-Protokoll und Rückgängig-Funktion.
 ## Installation
 
 1. `src/AD-Schnellanlage.ps1` auf den Server kopieren (z. B. nach `C:\Scripts`).
-2. Optional: Werte im Block `KONFIGURATION` am Anfang des Scripts anpassen.
+2. Optional: Voreinstellungen im Menü **[E]** ändern und speichern (landet in `Einstellungen.json`
+   neben dem Script, Beispiel: `config/Einstellungen.example.json`) – oder direkt im Block
+   `KONFIGURATION` am Anfang des Scripts.
 
 ## Start
 
@@ -41,9 +43,10 @@ Für die AD-Punkte braucht es einen Domänencontroller oder das Windows-Feature
 | 8 | Mitglieder zu Gruppen hinzufügen |
 | 9 | Rückgängig machen anhand des Protokolls (AD und DNS) |
 | D | DNS: Rolle installieren, Forward-/Reverse-Zonen, Einträge per Schnelleingabe mit automatischem PTR, fehlende PTR auffüllen, Weiterleitungen, Namensauflösung testen |
+| E | Einstellungen: Präfixe, Namensmuster, Benutzer-Standards, DNS und Module ändern und dauerhaft speichern |
 | P | Protokoll der Sitzung anzeigen |
 
-Ausführliche Bedienung: [docs/Bedienung.md](docs/Bedienung.md) · DNS: [docs/DNS.md](docs/DNS.md)
+Ausführliche Bedienung: [docs/Bedienung.md](docs/Bedienung.md) · DNS: [docs/DNS.md](docs/DNS.md) · Einstellungen: [docs/Einstellungen.md](docs/Einstellungen.md)
 
 ## Entwicklung
 

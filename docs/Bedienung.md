@@ -51,6 +51,8 @@ Mehrere Gruppen mit `|` trennen. Eine Vorlage erzeugt Menüpunkt [V].
 
 ## Namensregeln
 
+Alle Werte lassen sich im Menü **[E]** ändern und dauerhaft speichern, siehe [Einstellungen.md](Einstellungen.md).
+
 | Einstellung | Standard | Beispiel |
 |-------------|----------|----------|
 | `$PrefixGG` | `GG_` | `GG_Vertrieb` |

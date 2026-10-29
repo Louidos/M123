@@ -26,6 +26,8 @@
       [D] DNS: Status, Rolle installieren, Forward-/Reverse-Zonen, Eintraege per
           Schnelleingabe (srv01=192.168.10.5, www=srv01, @=MX:mail:10) mit
           automatischem PTR, fehlende PTR auffuellen, Weiterleitungen, Namensaufloesung
+      [E] Einstellungen: Praefixe, Namensmuster, Benutzer-Standards, DNS und Module
+          ansehen, aendern und dauerhaft in Einstellungen.json speichern
       [P] Protokoll der Sitzung anzeigen
 
 .NOTES
@@ -41,7 +43,9 @@
 $ScriptVersion = '1.0.0'
 
 #region ======================= KONFIGURATION =======================
-# Alles in diesem Block darf angepasst werden.
+# Alles in diesem Block darf angepasst werden. Einfacher: Menüpunkt [E] Einstellungen -
+# dort geänderte Werte landen in "Einstellungen.json" neben dem Script und gelten beim
+# nächsten Start über diesen Standards.
 
 # --- Namensregeln ----------------------------------------------------
 $PrefixGG            = 'GG_'      # Praefix globale Gruppen             -> GG_Vertrieb
@@ -2153,6 +2157,403 @@ function Start-DnsTest {
 }
 #endregion
 
+#region ======================= EINSTELLUNGEN [E] ====================
+
+# Alle Werte, die unter [E] änderbar sind. Schluessel = Variablenname bzw. 'Tabelle.Schlüssel'
+function Get-EinstellungsDefinitionen {
+    $d = [System.Collections.Generic.List[object]]::new()
+    $neu = {
+        param($Gruppe, $Schluessel, $Text, $Art, $Hinweis = '', $Min = 0, $Max = 0, $Werte = @())
+        $d.Add([pscustomobject]@{ Gruppe = $Gruppe; Schluessel = $Schluessel; Text = $Text; Art = $Art; Hinweis = $Hinweis; Min = $Min; Max = $Max; Werte = $Werte })
+    }
+    $g = 'Namensregeln'
+    & $neu $g 'PrefixGG'            'Präfix globale Gruppen'            'Praefix'
+    & $neu $g 'PrefixDL'            'Präfix domänenlokale Gruppen'      'Praefix'
+    & $neu $g 'TrennerRechte'       'Trenner Name / Rechte'             'Praefix'
+    & $neu $g 'VerbinderRechte'     'Verbinder zwischen Rechten'        'Praefix'
+    & $neu $g 'BenutzernameMuster'  'Muster Anmeldename'                'Muster'      'Platzhalter: {vorname} {nachname} {v} {n}'
+    & $neu $g 'EmailMuster'         'Muster E-Mail'                     'EmailMuster' 'Platzhalter: {anmeldename} {domain} {vorname} {nachname} {v} {n}; leer = keine E-Mail'
+    & $neu $g 'MailDomain'          'Mail-Domain'                       'Domain'      'leer = DNS-Name der Domäne'
+    & $neu $g 'UPNSuffix'           'UPN-Suffix'                        'Domain'      'leer = DNS-Name der Domäne'
+    & $neu $g 'NamenKleinschreiben' 'Anmeldename / E-Mail klein'        'Bool'
+    $g = 'Benutzer-Standards'
+    & $neu $g 'EinstellungenFragen'     'Kontoeinstellungen jedes Mal fragen' 'Bool'
+    & $neu $g 'StandardKonto.Aktiviert' 'Konto sofort aktiv'                  'Bool'
+    & $neu $g 'StandardKonto.PwAendern' 'Passwort bei 1. Anmeldung ändern'    'Bool'
+    & $neu $g 'StandardKonto.PwNieAb'   'Passwort läuft nie ab'               'Bool'
+    & $neu $g 'PasswortLaenge'          'Länge der Zufallspasswörter'         'Zahl'     '8 bis 128 Zeichen' 8 128
+    & $neu $g 'HomeBasisPfad'           'Basis-Pfad Home-Ordner'              'Pfad'     'z.B. \\SRV01\Home$ oder D:\Home, leer = wird gefragt'
+    & $neu $g 'HomeLaufwerk'            'Laufwerk Home-Ordner'                'Laufwerk' 'z.B. H:'
+    & $neu $g 'HomeRecht'               'NTFS-Recht auf Home-Ordner'          'NtfsRecht' 'z.B. Modify, FullControl, ReadAndExecute'
+    $g = 'OU / Abteilung'
+    & $neu $g 'OUSchutzVorLoeschen' 'OUs vor Löschen schützen'   'Bool'
+    & $neu $g 'AbteilungsUnterOUs'  'Unter-OUs einer Abteilung'  'OUListe' "mit Komma, '-' = keine"
+    & $neu $g 'AbteilungBenutzerOU' 'Unter-OU für Benutzer'      'OUName'
+    & $neu $g 'AbteilungGruppenOU'  'Unter-OU für Gruppen'       'OUName'
+    $g = 'DNS'
+    & $neu $g 'DnsServerName'      'DNS-Server'                 'Server'  'leer = dieser Server'
+    & $neu $g 'DnsReplikation'     'Replikation AD-Zonen'       'Auswahl' 'Domain, Forest oder Legacy' 0 0 @('Domain', 'Forest', 'Legacy')
+    & $neu $g 'DnsStandardTTL'     'Standard-TTL'               'TTL'     'Format hh:mm:ss'
+    & $neu $g 'DnsAutoPTR'         'PTR automatisch anlegen'    'Bool'
+    & $neu $g 'DnsWeiterleitungen' 'Vorschlag Weiterleitungen'  'IPListe' "IP-Adressen mit Komma, '-' = keine"
+    $texte = @{
+        OU = '[1] OUs erstellen'; Benutzer = '[2] Benutzer erstellen'; CsvImport = '[3] CSV-Import + [V] Vorlage'
+        GlobaleGruppen = '[4] Globale Gruppen'; DLGruppen = '[5] Domänenlokale Gruppen'; AGDLP = '[6] AGDLP-Paket'
+        Abteilung = '[7] Abteilung komplett'; Mitgliedschaften = '[8] Mitgliedschaften'; Rueckgaengig = '[9] Rückgängig'
+        DNS = '[D] DNS-Menü'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
+        VorlageBenutzer = 'Benutzer: Vorlage kopieren'; GruppenZuweisen = 'Gruppen direkt zuweisen'
+        AbteilungAusfuellen = 'Benutzer: Feld Abteilung'; EmailAusfuellen = 'Benutzer: E-Mail ausfüllen'
+        HomeOrdner = 'Benutzer: Home-Ordner'; NTFSRechte = 'DL-Gruppen: NTFS-Rechte'; Freigabe = 'DL-Gruppen: SMB-Freigabe'
+        FensterAuswahl = 'Auswahlfenster (Out-GridView)'; Vorschau = 'Vorschau vor dem Erstellen'; Protokoll = 'CSV-Protokoll'
+        DnsRolle = '[D][2] DNS-Rolle installieren'; DnsZonen = '[D][3]+[4] Zonen'; DnsEintraege = '[D][5] Einträge'
+        DnsPTRAuffuellen = '[D][6] PTR auffüllen'; DnsWeiterleitung = '[D][7] Weiterleitungen'; DnsTest = '[D][8] Namensauflösung'
+    }
+    foreach ($k in @($Funktionen.Keys)) {
+        $text = if ($texte.ContainsKey($k)) { $texte[$k] } else { $k }
+        & $neu 'Module ein/aus' "Funktionen.$k" $text 'Bool'
+    }
+    return $d.ToArray()
+}
+
+function Get-EinstellungsWert([string]$Schluessel) {
+    if ($Schluessel -match '^(StandardKonto|Funktionen)\.(.+)$') {
+        $tabelle = Get-Variable -Name $Matches[1] -ValueOnly
+        return , $tabelle[$Matches[2]]
+    }
+    return , (Get-Variable -Name $Schluessel -ValueOnly)
+}
+
+function Set-EinstellungsWert([string]$Schluessel, $Wert) {
+    if ($Schluessel -match '^(StandardKonto|Funktionen)\.(.+)$') {
+        $tabelle = Get-Variable -Name $Matches[1] -ValueOnly
+        $tabelle[$Matches[2]] = $Wert
+        return
+    }
+    Set-Variable -Name $Schluessel -Value $Wert -Scope Script
+}
+
+function Test-EinstellungGleich($A, $B) {
+    return ((ConvertTo-Json -InputObject $A -Compress) -ceq (ConvertTo-Json -InputObject $B -Compress))
+}
+
+# Wert prüfen und umwandeln -> Ok, Wert, Fehler. $Wert kommt aus der Eingabe (Text) oder aus der JSON-Datei
+function Test-EinstellungsWert($Definition, $Wert) {
+    $e = [pscustomobject]@{ Ok = $false; Wert = $null; Fehler = '' }
+    $art = $Definition.Art
+
+    if ($art -eq 'Bool') {
+        if ($Wert -is [bool]) { $e.Wert = $Wert }
+        elseif ("$Wert" -in 'true', 'false') { $e.Wert = ("$Wert" -eq 'true') }
+        else { $e.Fehler = 'erwartet true oder false'; return $e }
+        $e.Ok = $true
+        return $e
+    }
+    if ($art -eq 'Zahl') {
+        $zahl = 0
+        if ($Wert -is [bool] -or -not [int]::TryParse("$Wert", [ref]$zahl)) { $e.Fehler = "erwartet eine ganze Zahl ($($Definition.Min) bis $($Definition.Max))"; return $e }
+        if ($zahl -lt $Definition.Min -or $zahl -gt $Definition.Max) { $e.Fehler = "muss zwischen $($Definition.Min) und $($Definition.Max) liegen"; return $e }
+        $e.Wert = $zahl
+        $e.Ok = $true
+        return $e
+    }
+    if ($art -in 'OUListe', 'IPListe') {
+        if ($null -eq $Wert) { $teile = @() }
+        elseif ($Wert -is [array]) { $teile = @($Wert | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+        elseif ("$Wert".Trim() -in '', '-', 'leer') { $teile = @() }
+        else { $teile = @("$Wert" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+        foreach ($t in $teile) {
+            if ($art -eq 'IPListe' -and -not (Get-IpArt $t)) { $e.Fehler = "'$t' ist keine gültige IP-Adresse"; return $e }
+            if ($art -eq 'OUListe' -and $t -match '[,=+<>#;\\"/]') { $e.Fehler = "'$t': ungültige Zeichen für einen OU-Namen"; return $e }
+        }
+        $e.Wert = [string[]]@($teile | Select-Object -Unique)
+        $e.Ok = $true
+        return $e
+    }
+
+    # alle übrigen Arten sind Text
+    if ($null -eq $Wert) { $Wert = '' }
+    if ($Wert -isnot [string]) { $e.Fehler = 'erwartet einen Text'; return $e }
+    $text = $Wert.Trim()
+    if ($text -eq 'leer') { $text = '' }
+    switch ($art) {
+        'Praefix' {
+            if ($text -match '["/\\\[\]:;|=,+*?<>@\s]') { $e.Fehler = 'enthält Zeichen, die in AD-Gruppennamen nicht erlaubt sind (" / \ [ ] : ; | = , + * ? < > @ Leerzeichen)'; return $e }
+            if ($text.Length -gt 20) { $e.Fehler = 'höchstens 20 Zeichen'; return $e }
+        }
+        'Muster' {
+            if ($text -cnotmatch '\{vorname\}|\{nachname\}') { $e.Fehler = 'muss {vorname} oder {nachname} enthalten'; return $e }
+        }
+        'EmailMuster' {
+            if ($text -and ($text -notmatch '@' -or $text -cnotmatch '\{(vorname|nachname|anmeldename|v|n)\}')) {
+                $e.Fehler = 'braucht ein @ und {anmeldename}, {vorname} oder {nachname} (leer = keine E-Mail)'; return $e
+            }
+        }
+        { $_ -in 'Domain', 'Server' } {
+            if ($text -and -not (Test-DnsHostname $text)) { $e.Fehler = "kein gültiger Name: $(Get-DnsHostnameFehler $text)"; return $e }
+            $text = $text.TrimEnd('.')
+        }
+        'Laufwerk' {
+            if ($text -notmatch '^[A-Za-z]:$') { $e.Fehler = 'Format: Buchstabe und Doppelpunkt, z.B. H:'; return $e }
+            $text = $text.ToUpper()
+        }
+        'NtfsRecht' {
+            $ok = $false
+            if ($text -match '^[A-Za-z, ]+$') { try { $null = [System.Security.AccessControl.FileSystemRights]$text; $ok = $true } catch { } }
+            if (-not $ok) { $e.Fehler = 'kein NTFS-Recht (z.B. Modify, FullControl, ReadAndExecute)'; return $e }
+        }
+        'OUName' {
+            if (-not $text) { $e.Fehler = 'darf nicht leer sein'; return $e }
+            if ($text -match '[,=+<>#;\\"/]') { $e.Fehler = 'ungültige Zeichen für einen OU-Namen'; return $e }
+        }
+        'TTL' {
+            if (-not (ConvertTo-DnsTtl $text)) { $e.Fehler = 'Format hh:mm:ss, z.B. 01:00:00'; return $e }
+        }
+        'Auswahl' {
+            $treffer = @($Definition.Werte | Where-Object { $_ -eq $text }) | Select-Object -First 1
+            if (-not $treffer) { $e.Fehler = "erlaubt: $($Definition.Werte -join ', ')"; return $e }
+            $text = $treffer
+        }
+        'Pfad' { $text = $text.Trim('"') }
+    }
+    $e.Wert = $text
+    $e.Ok = $true
+    return $e
+}
+
+function Format-EinstellungsWert($Definition, $Wert) {
+    if ($Definition.Art -eq 'Bool') { if ($Wert) { return 'ja' } else { return 'nein' } }
+    if ($Definition.Art -in 'OUListe', 'IPListe') { $liste = @($Wert | Where-Object { $_ }); if ($liste.Count) { return ($liste -join ', ') } else { return '(keine)' } }
+    if ("$Wert" -eq '') { return '(leer)' }
+    return "$Wert"
+}
+
+# Beispieltext für die Vorschau. Der neue Wert überdeckt den Script-Wert nur hier (lokale Variable)
+function Get-EinstellungsBeispiel([string]$Schluessel, $Wert) {
+    if ($Schluessel -notmatch '\.') { Set-Variable -Name $Schluessel -Value $Wert }
+    if (-not $MailDomain) { $MailDomain = if ($Domain) { $Domain.DNSRoot } else { 'firma.local' } }
+    if (-not $UPNSuffix)  { $UPNSuffix  = if ($Domain) { $Domain.DNSRoot } else { 'firma.local' } }
+    $sam = Format-NamensMuster $BenutzernameMuster 'Max' 'Müller'
+    switch ($Schluessel) {
+        'PrefixGG'            { return "Globale Gruppe heißt dann: $($PrefixGG)Vertrieb" }
+        'PrefixDL'            { return "Domänenlokale Gruppe heißt dann: $(Get-DLName 'Vertrieb' @('R', 'W'))" }
+        'TrennerRechte'       { return "Domänenlokale Gruppe heißt dann: $(Get-DLName 'Vertrieb' @('R', 'W'))" }
+        'VerbinderRechte'     { return "Domänenlokale Gruppe heißt dann: $(Get-DLName 'Vertrieb' @('R', 'W'))" }
+        'BenutzernameMuster'  { return "Anmeldename für Max Müller: $sam" }
+        'NamenKleinschreiben' { return "Anmeldename für Max Müller: $sam" }
+        'EmailMuster'         { if (-not $EmailMuster) { return 'E-Mail wird nicht ausgefüllt' }; return "E-Mail für Max Müller: $(Format-NamensMuster $EmailMuster 'Max' 'Müller' $sam)" }
+        'MailDomain'          { if (-not $EmailMuster) { return '' }; return "E-Mail für Max Müller: $(Format-NamensMuster $EmailMuster 'Max' 'Müller' $sam)" }
+        'UPNSuffix'           { return "Anmeldung (UPN) für Max Müller: $sam@$UPNSuffix" }
+        'PasswortLaenge'      { return "Zufallspasswörter haben $Wert Zeichen (oder mehr, wenn die Domänen-Richtlinie das verlangt)" }
+        'AbteilungsUnterOUs'  { $u = @($Wert | Where-Object { $_ }); if (-not $u.Count) { return 'Abteilung Vertrieb bekommt keine Unter-OUs' }; return "Abteilung Vertrieb bekommt: $((@($u) | ForEach-Object { "Vertrieb/$_" }) -join ', ')" }
+        'DnsServerName'       { if (-not $Wert) { return 'DNS-Befehle laufen auf diesem Server' }; return "DNS-Befehle laufen mit -ComputerName $Wert" }
+        'DnsStandardTTL'      { return "Neue DNS-Einträge bekommen die TTL $(ConvertTo-DnsTtl $Wert)" }
+    }
+    return ''
+}
+
+# Beim Start: Standardwerte merken, dann Einstellungen.json darüberlegen
+function Initialize-Einstellungen {
+    $stand = [ordered]@{}
+    foreach ($d in Get-EinstellungsDefinitionen) {
+        $w = Get-EinstellungsWert $d.Schluessel
+        if ($w -is [array]) { $w = $w.Clone() }
+        $stand[$d.Schluessel] = $w
+    }
+    $script:EinstellungenStandard = $stand
+    $script:EinstellungenGesetzt  = [ordered]@{}
+    Import-Einstellungen
+}
+
+# JSON-Text prüfen -> Werte (nur gültige, bekannte Einträge) + Warnungen. Ändert nichts.
+function ConvertFrom-EinstellungenJson([string]$Json, [object[]]$Definitionen) {
+    $werte     = [ordered]@{}
+    $warnungen = [System.Collections.Generic.List[string]]::new()
+    $ergebnis  = [pscustomobject]@{ Werte = $werte; Warnungen = $warnungen }
+    $objekt = $null
+    try { $objekt = ConvertFrom-Json -InputObject $Json -ErrorAction Stop }
+    catch { $warnungen.Add("Einstellungen.json ist fehlerhaft ($($_.Exception.Message)) - es gelten die Standardwerte."); return $ergebnis }
+    if ($objekt -isnot [System.Management.Automation.PSCustomObject]) {
+        $warnungen.Add('Einstellungen.json enthält kein JSON-Objekt { ... } - es gelten die Standardwerte.')
+        return $ergebnis
+    }
+    foreach ($p in $objekt.PSObject.Properties) {
+        if ($p.Name.StartsWith('_')) { continue }   # Kommentare wie "_Hinweis"
+        $def = @($Definitionen | Where-Object { $_.Schluessel -eq $p.Name }) | Select-Object -First 1
+        if (-not $def) { $warnungen.Add("Einstellungen.json: unbekannter Eintrag '$($p.Name)' - wird ignoriert."); continue }
+        $pruefung = Test-EinstellungsWert $def $p.Value
+        if (-not $pruefung.Ok) { $warnungen.Add("Einstellungen.json: '$($p.Name)' $($pruefung.Fehler) - Standardwert gilt."); continue }
+        $werte[$def.Schluessel] = $pruefung.Wert
+    }
+    return $ergebnis
+}
+
+function Import-Einstellungen {
+    $pfad = $script:EinstellungenDatei
+    if (-not $pfad -or -not (Test-Path -LiteralPath $pfad -PathType Leaf)) { return }
+    try   { $text = [System.IO.File]::ReadAllText($pfad) }
+    catch { Write-Warnung "Einstellungen.json nicht lesbar ($($_.Exception.Message)) - es gelten die Standardwerte."; return }
+    $ergebnis = ConvertFrom-EinstellungenJson $text (Get-EinstellungsDefinitionen)
+    foreach ($w in $ergebnis.Warnungen) { Write-Warnung $w }
+    foreach ($k in @($ergebnis.Werte.Keys)) {
+        Set-EinstellungsWert $k $ergebnis.Werte[$k]
+        $script:EinstellungenGesetzt[$k] = $ergebnis.Werte[$k]
+    }
+    if ($ergebnis.Werte.Count) { Write-Info "$($ergebnis.Werte.Count) Einstellung(en) aus Einstellungen.json übernommen." }
+}
+
+# Folgen einer Änderung sofort anwenden ('*' = alles)
+function Update-NachEinstellung([string]$Schluessel) {
+    if ($Schluessel -in '*', 'MailDomain' -and -not $MailDomain -and $Domain) { $script:MailDomain = $Domain.DNSRoot }
+    if ($Schluessel -in '*', 'UPNSuffix'  -and -not $UPNSuffix  -and $Domain) { $script:UPNSuffix  = $Domain.DNSRoot }
+    if ($Schluessel -in '*', 'DnsServerName' -and $script:Faehig) { $script:Faehig = Get-Faehigkeiten }
+    if ($Schluessel -in '*', 'Funktionen.FensterAuswahl' -and $script:Faehig) { $script:GuiVerfuegbar = $Funktionen.FensterAuswahl -and $script:Faehig.Gui }
+}
+
+# Wert setzen, für "Speichern" merken und sofort wirksam machen
+function Set-Einstellung([string]$Schluessel, $Wert) {
+    Set-EinstellungsWert $Schluessel $Wert
+    $script:EinstellungenGesetzt[$Schluessel] = $Wert
+    Update-NachEinstellung $Schluessel
+}
+
+# Gesetzte Werte, die vom Standard im Script abweichen
+function Get-EinstellungsAenderungen {
+    $aenderungen = [ordered]@{}
+    foreach ($k in @($script:EinstellungenGesetzt.Keys)) {
+        if (-not (Test-EinstellungGleich $script:EinstellungenGesetzt[$k] $script:EinstellungenStandard[$k])) {
+            $aenderungen[$k] = $script:EinstellungenGesetzt[$k]
+        }
+    }
+    return $aenderungen
+}
+
+# Schreibt nur die geänderten Werte (UTF-8). Keine Abweichung -> vorhandene Datei wird gelöscht
+function Save-EinstellungsDatei {
+    $aenderungen = Get-EinstellungsAenderungen
+    $pfad = $script:EinstellungenDatei
+    if ($aenderungen.Count -eq 0) {
+        if (Test-Path -LiteralPath $pfad -PathType Leaf) { Remove-Item -LiteralPath $pfad -Force -ErrorAction Stop }
+        return 0
+    }
+    $daten = [ordered]@{ '_Hinweis' = "Gespeichert von AD-Schnellanlage $ScriptVersion am $((Get-Date).ToString('yyyy-MM-dd HH:mm')). Nur geänderte Werte - alles andere kommt aus dem Script." }
+    foreach ($k in @($aenderungen.Keys)) { $daten[$k] = $aenderungen[$k] }
+    $json = ConvertTo-Json -InputObject $daten -Depth 4
+    [System.IO.File]::WriteAllText($pfad, $json, [System.Text.UTF8Encoding]::new($false))
+    return $aenderungen.Count
+}
+
+# Alle Werte auf die Standards im Script zurück, Einstellungen.json löschen
+function Reset-Einstellungen {
+    if (Test-Path -LiteralPath $script:EinstellungenDatei -PathType Leaf) { Remove-Item -LiteralPath $script:EinstellungenDatei -Force -ErrorAction Stop }
+    foreach ($k in @($script:EinstellungenStandard.Keys)) {
+        $w = $script:EinstellungenStandard[$k]
+        if ($w -is [array]) { $w = $w.Clone() }
+        Set-EinstellungsWert $k $w
+    }
+    $script:EinstellungenGesetzt = [ordered]@{}
+    Update-NachEinstellung '*'
+}
+
+function Edit-Einstellung($Definition) {
+    $aktuell = Get-EinstellungsWert $Definition.Schluessel
+    if ($Definition.Art -eq 'Bool') {
+        $neu = -not [bool]$aktuell
+    }
+    else {
+        if ($Definition.Hinweis) { Write-Info $Definition.Hinweis }
+        $vorschlag = if ($Definition.Art -in 'OUListe', 'IPListe') { (@($aktuell | Where-Object { $_ }) -join ', ') } else { "$aktuell" }
+        while ($true) {
+            $eingabe = Read-Text "Neuer Wert für '$($Definition.Text)' (Enter = behalten, 'leer' = leeren)" $vorschlag
+            if ($eingabe -ceq $vorschlag) { return }
+            $pruefung = Test-EinstellungsWert $Definition $eingabe
+            if ($pruefung.Ok) { $neu = $pruefung.Wert; break }
+            Write-Warnung $pruefung.Fehler
+        }
+        if (Test-EinstellungGleich $neu $aktuell) { return }
+        $beispiel = Get-EinstellungsBeispiel $Definition.Schluessel $neu
+        if ($beispiel) { Write-Ok "Vorschau: $beispiel" }
+        if ($Funktionen.Vorschau -and -not (Read-JaNein 'Übernehmen?' $true)) { return }
+    }
+    Set-Einstellung $Definition.Schluessel $neu
+    Write-Ok "$($Definition.Text): $(Format-EinstellungsWert $Definition $neu)   (gilt sofort; [S] = dauerhaft speichern)"
+    if ($Definition.Art -eq 'Bool') {
+        $beispiel = Get-EinstellungsBeispiel $Definition.Schluessel $neu
+        if ($beispiel) { Write-Info "Vorschau: $beispiel" }
+    }
+}
+
+function Show-EinstellungsGruppe([string]$Gruppe) {
+    while ($true) {
+        $defs = @(Get-EinstellungsDefinitionen | Where-Object { $_.Gruppe -eq $Gruppe })
+        Write-Titel "Einstellungen: $Gruppe"
+        for ($i = 0; $i -lt $defs.Count; $i++) {
+            $d      = $defs[$i]
+            $wert   = Get-EinstellungsWert $d.Schluessel
+            $zusatz = ''
+            if ($script:EinstellungenStandard.Contains($d.Schluessel) -and -not (Test-EinstellungGleich $wert $script:EinstellungenStandard[$d.Schluessel])) {
+                $zusatz = "   (Standard: $(Format-EinstellungsWert $d $script:EinstellungenStandard[$d.Schluessel]))"
+            }
+            Write-Host ('  [{0,2}] {1,-36} {2}{3}' -f ($i + 1), $d.Text, (Format-EinstellungsWert $d $wert), $zusatz)
+        }
+        $eingabe = Read-Text 'Nummer zum Ändern (Ja/Nein wird umgeschaltet, Enter = zurück)'
+        if (-not $eingabe) { return }
+        $nr = ConvertFrom-NummernAuswahl $eingabe $defs.Count
+        if ($null -eq $nr -or $nr.Count -ne 1) { Write-Warnung 'Bitte eine Nummer eingeben.'; continue }
+        try { Edit-Einstellung $defs[$nr[0] - 1] }
+        catch [System.OperationCanceledException] { Write-Warnung 'Abgebrochen.' }
+    }
+}
+
+function Start-Einstellungen {
+    $gruppen = @('Namensregeln', 'Benutzer-Standards', 'OU / Abteilung', 'DNS', 'Module ein/aus')
+    while ($true) {
+        $offen = Get-EinstellungsAenderungen
+        $datei = Test-Path -LiteralPath $script:EinstellungenDatei -PathType Leaf
+        Write-Titel 'Einstellungen'
+        for ($i = 0; $i -lt $gruppen.Count; $i++) { Write-Host ('  [{0}] {1}' -f ($i + 1), $gruppen[$i]) }
+        Write-Host "  [S] Speichern in Einstellungen.json ($($offen.Count) vom Standard abweichende Werte)"
+        Write-Host '  [R] Auf Standard zurücksetzen'
+        Write-Host '  [0] Zurück zum Hauptmenü'
+        Write-Info "Datei: $script:EinstellungenDatei  ($(if ($datei) { 'vorhanden' } else { 'noch nicht gespeichert' }))"
+        $wahl = "$(Read-Host '  Auswahl')".Trim().ToUpper()
+        if (-not $wahl -or $wahl -eq '0') {
+            if ($offen.Count -and -not $datei) { Write-Info 'Hinweis: Änderungen gelten nur bis zum Beenden - mit [S] dauerhaft speichern.' }
+            return
+        }
+        $zahl = 0
+        if ([int]::TryParse($wahl, [ref]$zahl) -and $zahl -ge 1 -and $zahl -le $gruppen.Count) { Show-EinstellungsGruppe $gruppen[$zahl - 1]; continue }
+        try {
+            switch ($wahl) {
+                'S' {
+                    if ($offen.Count) {
+                        Write-Info 'Wird gespeichert:'
+                        $defs = @(Get-EinstellungsDefinitionen)
+                        foreach ($k in @($offen.Keys)) {
+                            $d = @($defs | Where-Object { $_.Schluessel -eq $k }) | Select-Object -First 1
+                            Write-Host ('    {0,-36} {1}  ->  {2}' -f $d.Text, (Format-EinstellungsWert $d $script:EinstellungenStandard[$k]), (Format-EinstellungsWert $d $offen[$k])) -ForegroundColor White
+                        }
+                    }
+                    elseif ($datei) { Write-Info 'Alle Werte entsprechen den Standards - Einstellungen.json wird gelöscht.' }
+                    else { Write-Info 'Nichts zu speichern - alle Werte entsprechen den Standards.'; continue }
+                    if (-not (Read-JaNein 'Jetzt speichern?' $true)) { Stop-Aktion }
+                    $anzahl = Save-EinstellungsDatei
+                    if ($anzahl) { Write-Ok "$anzahl Wert(e) gespeichert: $script:EinstellungenDatei" } else { Write-Ok 'Einstellungen.json gelöscht - es gelten die Standards.' }
+                }
+                'R' {
+                    Write-Warnung 'Alle Werte gehen auf die Standards im Script zurück, Einstellungen.json wird gelöscht.'
+                    if (-not (Read-JaNein 'Wirklich zurücksetzen?' $false)) { Stop-Aktion }
+                    Reset-Einstellungen
+                    Write-Ok 'Standardwerte wiederhergestellt.'
+                }
+                default { Write-Warnung 'Ungültige Auswahl.' }
+            }
+        }
+        catch [System.OperationCanceledException] { Write-Warnung 'Abgebrochen.' }
+        catch { Write-Host "  FEHLER: $($_.Exception.Message)" -ForegroundColor Red }
+    }
+}
+#endregion
+
 #region ======================= [P] PROTOKOLL ========================
 
 function Show-Protokoll {
@@ -2290,6 +2691,7 @@ function Get-Hauptmenue {
         [pscustomobject]@{ Taste = '8'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
         [pscustomobject]@{ Taste = '9'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
         [pscustomobject]@{ Taste = 'D'; Text = 'DNS: Zonen, Einträge, PTR, Weiterleitungen';                  An = $Funktionen.DNS;              Braucht = @();     Aktion = { Start-DnsMenue } }
+        [pscustomobject]@{ Taste = 'E'; Text = 'Einstellungen ansehen und ändern';                            An = $true;                        Braucht = @();     Aktion = { Start-Einstellungen } }
         [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }
     )
 }
@@ -2310,15 +2712,16 @@ function Show-Startanzeige {
 #region ======================= START ===============================
 
 function Start-Hauptprogramm {
+    $script:ScriptOrdner       = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
+    $script:EinstellungenDatei = Join-Path $script:ScriptOrdner 'Einstellungen.json'
+    Initialize-Einstellungen
+
     $script:Faehig       = Get-Faehigkeiten
     $script:Domain       = $null
     $script:PwRichtlinie = [pscustomobject]@{ MinPasswordLength = 8; ComplexityEnabled = $true }
     if ($script:Faehig.AD) { Initialize-AdUmgebung }
 
-    if (-not $LogOrdner) {
-        $basis = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
-        $script:LogOrdner = Join-Path $basis 'AD-Schnellanlage-Protokolle'
-    }
+    if (-not $LogOrdner) { $script:LogOrdner = Join-Path $script:ScriptOrdner 'AD-Schnellanlage-Protokolle' }
     if (-not (Test-Path -LiteralPath $LogOrdner)) {
         try   { New-Item -ItemType Directory -Path $LogOrdner -Force -ErrorAction Stop | Out-Null }
         catch { Write-Warnung "Protokollordner nicht anlegbar: $($_.Exception.Message)" }
