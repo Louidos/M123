@@ -120,7 +120,7 @@ Describe 'Get-Hauptmenue' {
     $menue = @(Get-Hauptmenue)
 
     It 'enthält alle bisherigen Menüpunkte' {
-        (@($menue | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,4,5,6,7,8,D,G,S,E,P'
+        (@($menue | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,4,5,6,7,8,D,G,H,S,E,P'
     }
     It 'hat keinen CSV-Import und keine CSV-Vorlage mehr' {
         @($menue | Where-Object { $_.Taste -eq 'V' -or $_.Text -match 'CSV' }).Count | Should Be 0
@@ -136,6 +136,9 @@ Describe 'Get-Hauptmenue' {
     }
     It 'verlangt für [G] AD und die Datei Module\GPO.psm1' {
         (@(($menue | Where-Object { $_.Taste -eq 'G' }).Braucht) -join ',') | Should Be 'AD,GpoDatei'
+    }
+    It 'verlangt für [H] nur die Datei Module\DHCP.psm1 (Rolle wird im Menü installiert)' {
+        (@(($menue | Where-Object { $_.Taste -eq 'H' }).Braucht) -join ',') | Should Be 'DhcpDatei'
     }
     It 'zeigt das aktuelle Präfix im Text' {
         $PrefixGG = 'GG-'

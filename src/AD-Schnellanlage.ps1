@@ -6,11 +6,11 @@
 .DESCRIPTION
     Interaktives Menue fuer Windows Server.
     Nutzt ausschliesslich Bordmittel: Module ActiveDirectory, DnsServer, GroupPolicy,
-    ServerManager, SmbShare, DnsClient, .NET und - wenn vorhanden - Out-GridView. Keine
-    externen Programme, kein Internet.
+    DhcpServer, ServerManager, SmbShare, NetTCPIP, DnsClient, .NET und - wenn vorhanden -
+    Out-GridView. Keine externen Programme, kein Internet.
 
     Groessere Bereiche liegen als Teilmodule in Module\<Name>.psm1 neben dem Script
-    (GPO). Fehlt eine Datei, fehlt nur der zugehoerige Menuepunkt.
+    (GPO, DHCP). Fehlt eine Datei, fehlt nur der zugehoerige Menuepunkt.
 
     Das Script prueft beim Start, was auf dem Server vorhanden ist (Active Directory,
     DNS-Rolle, SMB, Auswahlfenster, Adminrechte). Menuepunkte, die hier nicht laufen
@@ -33,6 +33,10 @@
           per Group Policy Preferences, optional nur fuer eine Gruppe), Standard-
           Richtlinien (Systemsteuerung, Desktophintergrund, cmd, USB, Bildschirmsperre),
           mit OU verknuepfen, anzeigen, entfernen
+      [H] DHCP: Einrichtungs-Assistent (Rolle, Sicherheitsgruppen, Autorisierung im AD,
+          Server-Manager-Hinweis, Bereich mit Vorschlaegen aus der Netzwerkkarte und
+          Pruefungen), Bereiche, Reservierungen (MAC in jeder Schreibweise), anzeigen,
+          entfernen, ganze Konfiguration aus Datei
       [S] Subnetzrechner (IPv4): Maske, Netz, Broadcast, erster/letzter Host, Anzahl
           Hosts - braucht weder AD noch DNS
       [E] Einstellungen: Praefixe, Namensmuster, Benutzer-Standards, DNS und Module
@@ -118,6 +122,7 @@ $Funktionen = [ordered]@{
     Rueckgaengig        = $true   # [8] (braucht Protokoll)
     DNS                 = $true   # [D] DNS-Menü
     GPO                 = $true   # [G] Gruppenrichtlinien-Menü (Teilmodul Module\GPO.psm1)
+    DHCP                = $true   # [H] DHCP-Menü (Teilmodul Module\DHCP.psm1)
     Subnetzrechner      = $true   # [S] Subnetzrechner (braucht weder AD noch DNS)
     # Zusatzschritte in den Abläufen
     Schnelleingabe      = $true   # Benutzer: alle Namen in einer Zeile
@@ -1183,7 +1188,7 @@ function Start-Rueckgaengig {
     $adTypen = 'Mitglied', 'Benutzer', 'Gruppe', 'OU'
     $rueck   = @($daten | Where-Object { $typen -contains $_.Typ })
     $manuell = @($daten | Where-Object { $_.Typ -in 'Ordner', 'NTFS', 'Home' } | Select-Object -ExpandProperty DN -Unique)
-    $hinweis = @($daten | Where-Object { $_.Typ -in 'DNS-Rolle', 'DNS-Forwarder' -or $_.Typ -like 'GPO*' })
+    $hinweis = @($daten | Where-Object { $_.Typ -in 'DNS-Rolle', 'DNS-Forwarder' -or $_.Typ -like 'GPO*' -or $_.Typ -like 'DHCP*' })
     if ($rueck.Count -eq 0) {
         Write-Warnung 'In diesem Protokoll gibt es nichts zum Rückgängigmachen.'
         foreach ($h in $hinweis) { Write-Info "Wird nicht zurückgebaut: $($h.Typ) $($h.Name)" }
@@ -1259,7 +1264,7 @@ function Start-Rueckgaengig {
         foreach ($m in $manuell) { Write-Info $m }
     }
     if ($hinweis.Count) {
-        Write-Warnung 'Nicht zurückgebaut (bei Bedarf von Hand bzw. GPOs unter [G] entfernen): Rollen, Weiterleitungen, Gruppenrichtlinien'
+        Write-Warnung 'Nicht zurückgebaut (bei Bedarf von Hand bzw. unter [G] / [H] entfernen): Rollen, Weiterleitungen, Gruppenrichtlinien, DHCP'
         foreach ($h in $hinweis) { Write-Info "$($h.Typ): $($h.Name)  $($h.Info)" }
     }
 }
@@ -2352,7 +2357,7 @@ function Get-EinstellungsDefinitionen {
         OU = '[1] OUs erstellen'; Benutzer = '[2] Benutzer erstellen'
         GlobaleGruppen = '[3] Globale Gruppen'; DLGruppen = '[4] Domänenlokale Gruppen'; AGDLP = '[5] AGDLP-Paket'
         Abteilung = '[6] Abteilung komplett'; Mitgliedschaften = '[7] Mitgliedschaften'; Rueckgaengig = '[8] Rückgängig'
-        DNS = '[D] DNS-Menü'; GPO = '[G] Gruppenrichtlinien'; Subnetzrechner = '[S] Subnetzrechner'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
+        DNS = '[D] DNS-Menü'; GPO = '[G] Gruppenrichtlinien'; DHCP = '[H] DHCP'; Subnetzrechner = '[S] Subnetzrechner'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
         VorlageBenutzer = 'Benutzer: Vorlage kopieren'; GruppenZuweisen = 'Gruppen direkt zuweisen'
         AbteilungAusfuellen = 'Benutzer: Feld Abteilung'; EmailAusfuellen = 'Benutzer: E-Mail ausfüllen'
         HomeOrdner = 'Benutzer: Home-Ordner'; NTFSRechte = 'DL-Gruppen: NTFS-Rechte'; Freigabe = 'DL-Gruppen: SMB-Freigabe'
@@ -2746,8 +2751,8 @@ function Test-Adminrechte {
 
 # Was kann dieser Server? Ändert nichts und bricht nie ab.
 # Rückgabe: AD, DNS, DnsRolle, DnsDienst, Smb, Gui, Admin, ServerManager, GpoDatei,
-#           GroupPolicy, GPO ($true/$false), Domain (Ergebnis von Get-ADDomain) und
-#           Grund (Text je fehlender Fähigkeit)
+#           GroupPolicy, GPO, DhcpDatei, DhcpRolle, DhcpDienst, DhcpModul, DHCP ($true/$false),
+#           Domain (Ergebnis von Get-ADDomain) und Grund (Text je fehlender Fähigkeit)
 function Get-Faehigkeiten {
     $f = @{
         AD            = $false
@@ -2809,6 +2814,24 @@ function Get-Faehigkeiten {
     if (-not $f.GPO)         { $f.Grund.GPO = if (-not $f.AD) { $f.Grund.AD } else { $f.Grund.GroupPolicy } }
     if (-not $f.ServerManager) { $f.Grund.ServerManager = 'Modul ServerManager fehlt - Rollen hier nicht installierbar' }
 
+    # DHCP: Teilmodul-Datei, Rolle (Windows-Feature), Dienst, Modul DhcpServer - lokal
+    $f.DhcpDatei = [bool]($script:Teilmodule -and $script:Teilmodule['DHCP'])
+    $f.DhcpRolle = $false
+    if ($f.ServerManager) {
+        try   { $f.DhcpRolle = [bool](Get-WindowsFeature -Name DHCP -ErrorAction Stop).Installed }
+        catch { $f.DhcpRolle = $false }
+    }
+    $dhcpDienst = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+    if ($dhcpDienst -and -not $f.ServerManager) { $f.DhcpRolle = $true }   # ohne ServerManager: Dienst vorhanden = Rolle da
+    $f.DhcpDienst = [bool]($dhcpDienst -and "$($dhcpDienst.Status)" -eq 'Running')
+    $f.DhcpModul  = Import-ModulStill 'DhcpServer'
+    $f.DHCP       = $false
+    if (-not $f.DhcpDatei)      { $f.Grund.DhcpDatei = 'DHCP - Datei Module\DHCP.psm1 fehlt neben dem Script' }
+    if (-not $f.DhcpRolle)      { $f.Grund.DHCP = 'DHCP - Rolle nicht installiert' }
+    elseif (-not $f.DhcpDienst) { $f.Grund.DHCP = 'DHCP - Dienst läuft nicht' }
+    elseif (-not $f.DhcpModul)  { $f.Grund.DHCP = 'DHCP - Modul DhcpServer fehlt (Feature RSAT-DHCP)' }
+    else                        { $f.DHCP = $true }
+
     if (-not $f.Smb) { $f.Grund.Smb = 'SMB - Modul SmbShare fehlt' }
     if (-not $f.Gui) { $f.Grund.Gui = 'Auswahlfenster (Out-GridView) nicht vorhanden' }
     return $f
@@ -2845,7 +2868,7 @@ function Install-WindowsRolle {
     param([string]$Feature, [string]$Typ, [string]$Text)
     if (-not $script:Faehig.ServerManager) { Write-Warnung 'Modul ServerManager fehlt - Installation hier nicht möglich.'; return $false }
     $installiert = $false
-    try { $installiert = [bool](Get-WindowsFeature -Name $Feature -ErrorAction Stop).Installed } catch { }
+    try { $installiert = [bool](Get-WindowsFeature -Name $Feature -ErrorAction Stop).Installed } catch { $installiert = $false }
     if ($installiert) { Add-Ergebnis $Typ $Feature $env:COMPUTERNAME 'VORHANDEN'; $script:Faehig = Get-Faehigkeiten; return $true }
     if (-not $script:Faehig.Admin) { Write-Warnung 'Ohne Administratorrechte schlägt die Installation fehl.' }
     Write-Info "Wird installiert: $Text (Install-WindowsFeature $Feature -IncludeManagementTools)"
@@ -2894,6 +2917,7 @@ function Get-Hauptmenue {
         [pscustomobject]@{ Taste = '8'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
         [pscustomobject]@{ Taste = 'D'; Text = 'DNS: Zonen, Einträge, PTR, Weiterleitungen';                  An = $Funktionen.DNS;              Braucht = @();     Aktion = { Start-DnsMenue } }
         [pscustomobject]@{ Taste = 'G'; Text = 'Gruppenrichtlinien: GPOs, Netzlaufwerke, Standard-Richtlinien'; An = $Funktionen.GPO;              Braucht = @('AD', 'GpoDatei'); Aktion = { Start-GpoMenue } }
+        [pscustomobject]@{ Taste = 'H'; Text = 'DHCP: Einrichtungs-Assistent, Bereiche, Reservierungen';       An = $Funktionen.DHCP;             Braucht = @('DhcpDatei'); Aktion = { Start-DhcpMenue } }
         [pscustomobject]@{ Taste = 'S'; Text = 'Subnetzrechner (IPv4: Netz, Broadcast, Hosts)';              An = $Funktionen.Subnetzrechner;   Braucht = @();     Aktion = { Start-Subnetzrechner } }
         [pscustomobject]@{ Taste = 'E'; Text = 'Einstellungen ansehen und ändern';                            An = $true;                        Braucht = @();     Aktion = { Start-Einstellungen } }
         [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }
@@ -2919,7 +2943,7 @@ function Show-Startanzeige {
 # Einstellungen und Fähigkeiten des Hauptscripts mitbenutzen. Fehlt eine Datei, fehlen nur
 # ihre Menüpunkte (Grund steht im Menü). Pester lädt die Teilmodule beim Dot-Sourcing mit.
 $script:Teilmodule = @{}
-foreach ($teilmodul in @('GPO')) {
+foreach ($teilmodul in @('GPO', 'DHCP')) {
     $teilmodulPfad = Join-Path (Join-Path $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }) 'Module') "$teilmodul.psm1"
     if (-not (Test-Path -LiteralPath $teilmodulPfad -PathType Leaf)) { continue }
     try {

@@ -36,8 +36,9 @@ Mit `$Funktionen` abgeschaltete Punkte sind wie bisher ganz ausgeblendet.
 Jede Sitzung schreibt ein CSV-Protokoll nach `AD-Schnellanlage-Protokolle\AD-Anlage_<Datum>.csv`
 neben dem Script (Spalten `Zeit;Typ;Name;Status;DN;Bezug;Info`).
 
-GPOs, Links und GPO-Einstellungen aus **[G]** werden nicht zurückgebaut, sondern nur
-aufgelistet – eine GPO entfernt man mit [G][6] (siehe [GPO.md](GPO.md)).
+GPOs, Links und GPO-Einstellungen aus **[G]** sowie DHCP-Bereiche und -Einstellungen aus
+**[H]** werden nicht zurückgebaut, sondern nur aufgelistet – eine GPO entfernt man mit
+[G][6] (siehe [GPO.md](GPO.md)), einen DHCP-Bereich mit [H][6] (siehe [DHCP.md](DHCP.md)).
 
 [8] liest ein Protokoll und entfernt in dieser Reihenfolge: DNS-Einträge, DNS-Zonen (nur leere),
 Mitgliedschaften, Freigaben, Benutzer, Gruppen, OUs (nur leere). Details zu DNS: [DNS.md](DNS.md). Ordner, NTFS-Rechte und Home-Ordner werden **nicht**
@@ -51,6 +52,14 @@ nach dem Verteilen löschen!
 GPOs anlegen und verknüpfen, Netzlaufwerke (Group Policy Preferences) zuordnen und
 Standard-Richtlinien setzen. Braucht AD, das Modul `GroupPolicy` (Feature GPMC, unter [G]
 installierbar) und die Datei `Module\GPO.psm1` neben dem Script. Details: [GPO.md](GPO.md).
+
+## DHCP [H]
+
+DHCP in einem Durchlauf einrichten: Rolle, Sicherheitsgruppen, Autorisierung im AD,
+Dienst-Neustart, Server-Manager-Hinweis, dann Bereiche mit Vorschlägen aus der aktiven
+Netzwerkkarte und Prüfungen (Netz, Grenzen, Router/Server-IP ausschließen, keine
+Überschneidung). Dazu Reservierungen, Übersicht und Laden aus einer Datei. Braucht die Datei
+`Module\DHCP.psm1` neben dem Script; die Rolle installiert der Assistent. Details: [DHCP.md](DHCP.md).
 
 ## Subnetzrechner [S]
 
