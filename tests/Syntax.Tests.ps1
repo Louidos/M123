@@ -23,6 +23,12 @@ Describe 'AD-Schnellanlage.ps1 - Datei' {
     }
 }
 
+Describe 'src/ - ein einziges Script' {
+    It 'enthält nur AD-Schnellanlage.ps1 (kein Teilmodul, keine Zusatzdatei)' {
+        (@(Get-ChildItem -Path (Join-Path $wurzel 'src') -Recurse -File | ForEach-Object { $_.Name }) -join ',') | Should Be 'AD-Schnellanlage.ps1'
+    }
+}
+
 Describe 'Module unter src/ - Dateien' {
     $module = @(Get-ChildItem -Path (Join-Path $wurzel 'src') -Include '*.psm1', '*.psd1' -Recurse -File)
 

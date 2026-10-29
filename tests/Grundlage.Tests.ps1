@@ -134,11 +134,11 @@ Describe 'Get-Hauptmenue' {
         @(($menue | Where-Object { $_.Taste -eq 'P' }).Braucht).Count | Should Be 0
         @(($menue | Where-Object { $_.Taste -eq 'S' }).Braucht).Count | Should Be 0
     }
-    It 'verlangt für [G] AD und die Datei Module\GPO.psm1' {
-        (@(($menue | Where-Object { $_.Taste -eq 'G' }).Braucht) -join ',') | Should Be 'AD,GpoDatei'
+    It 'verlangt für [G] AD' {
+        (@(($menue | Where-Object { $_.Taste -eq 'G' }).Braucht) -join ',') | Should Be 'AD'
     }
-    It 'verlangt für [H] nur die Datei Module\DHCP.psm1 (Rolle wird im Menü installiert)' {
-        (@(($menue | Where-Object { $_.Taste -eq 'H' }).Braucht) -join ',') | Should Be 'DhcpDatei'
+    It 'zeigt [H] immer (Rolle wird im Menü installiert)' {
+        @(($menue | Where-Object { $_.Taste -eq 'H' }).Braucht).Count | Should Be 0
     }
     It 'zeigt das aktuelle Präfix im Text' {
         $PrefixGG = 'GG-'

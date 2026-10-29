@@ -4,15 +4,13 @@ Interaktives PowerShell-Script für Windows Server: OUs, Benutzer und Gruppen
 (inkl. AGDLP, Ordnerrechte und Freigaben) in Sekunden anlegen – mit Vorschau,
 CSV-Protokoll und Rückgängig-Funktion.
 
-- **Ein Ordner:** `src/` mit `AD-Schnellanlage.ps1` und den Teilmodulen in `Module\` (`GPO.psm1`, `DHCP.psm1`), direkt auf den Server kopierbar
+- **Eine Datei:** `src/AD-Schnellanlage.ps1` macht alles (AD, DNS, Gruppenrichtlinien, DHCP), direkt auf den Server kopierbar
 - **Nur Bordmittel:** Windows PowerShell 5.1, Module `ActiveDirectory`, `DnsServer`, `GroupPolicy`, `DhcpServer`, `ServerManager`, `SmbShare`, `NetTCPIP`, `DnsClient`, .NET, `Out-GridView` (falls vorhanden)
 - **Offline:** kein Internet, kein `Install-Module`, keine externen Programme
 
 ## Installation
 
-1. Den Inhalt von `src/` auf den Server kopieren (z. B. nach `C:\Scripts`), sodass dort
-   `AD-Schnellanlage.ps1` und der Ordner `Module` mit `GPO.psm1` und `DHCP.psm1` liegen. Fehlt ein
-   Teilmodul, startet das Script trotzdem – nur der zugehörige Menüpunkt fehlt dann.
+1. `src/AD-Schnellanlage.ps1` auf den Server kopieren (z. B. nach `C:\Scripts`).
 2. Optional: Voreinstellungen im Menü **[E]** ändern und speichern (landet in `Einstellungen.json`
    neben dem Script, Beispiel: `config/Einstellungen.example.json`) – oder direkt im Block
    `KONFIGURATION` am Anfang des Scripts.

@@ -51,7 +51,7 @@ nach dem Verteilen löschen!
 
 GPOs anlegen und verknüpfen, Netzlaufwerke (Group Policy Preferences) zuordnen und
 Standard-Richtlinien setzen. Braucht AD, das Modul `GroupPolicy` (Feature GPMC, unter [G]
-installierbar) und die Datei `Module\GPO.psm1` neben dem Script. Details: [GPO.md](GPO.md).
+installierbar). Details: [GPO.md](GPO.md).
 
 ## DHCP [H]
 
@@ -59,8 +59,8 @@ DHCP in einem Durchlauf einrichten: Rolle, Sicherheitsgruppen, Autorisierung im 
 Dienst-Neustart, Server-Manager-Hinweis, dann Bereiche mit Vorschlägen aus der aktiven
 Netzwerkkarte und Prüfungen (Netz, Grenzen, Router/Server-IP ausschließen, keine
 Überschneidung). Dazu Reservierungen, Übersicht, Laden aus einer Datei und die
-DNS-Integration (Clients automatisch mit A- und PTR-Eintrag ins DNS, Reverse-Zone, Dienstkonto). Braucht die Datei
-`Module\DHCP.psm1` neben dem Script; die Rolle installiert der Assistent. Details: [DHCP.md](DHCP.md).
+DNS-Integration (Clients automatisch mit A- und PTR-Eintrag ins DNS, Reverse-Zone, Dienstkonto). Die Rolle installiert der
+Assistent. Details: [DHCP.md](DHCP.md).
 
 ## Subnetzrechner [S]
 

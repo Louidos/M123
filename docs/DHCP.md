@@ -1,8 +1,8 @@
 # DHCP [H]
 
 Das Menü **[H]** richtet den DHCP-Server vollständig ein – inklusive Autorisierung im AD –
-und führt mit Vorschlägen durch jeden Bereich. Es steckt im Teilmodul `Module\DHCP.psm1`
-neben `AD-Schnellanlage.ps1`.
+und führt mit Vorschlägen durch jeden Bereich. Es ist Teil von
+`AD-Schnellanlage.ps1` (eine Datei).
 
 Annahmen: DHCP läuft auf **diesem** Server (typisch: Domänencontroller mit DNS), nur IPv4.
 
