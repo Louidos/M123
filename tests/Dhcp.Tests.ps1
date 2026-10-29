@@ -1,4 +1,4 @@
-﻿# Teilmodul DHCP: reine Hilfsfunktionen, Prüfungen, Konfigurationsdatei und Abläufe
+﻿# DHCP [H]: reine Hilfsfunktionen, Prüfungen, Konfigurationsdatei und Abläufe
 # (DHCP-, Netzwerk- und Dienst-Befehle gemockt). Kompatibel mit Pester 3.4 und 4.x.
 
 $wurzel = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -49,10 +49,10 @@ function New-TestPlan {
     return $p
 }
 
-Describe 'Teilmodul DHCP - Laden' {
-    It 'ist beim Dot-Sourcing geladen' {
-        $script:Teilmodule['DHCP'] | Should Match 'DHCP\.psm1$'
+Describe 'DHCP im Script' {
+    It 'ist beim Dot-Sourcing des einen Scripts da' {
         [bool](Get-Command Start-DhcpMenue -ErrorAction SilentlyContinue) | Should Be $true
+        [bool](Get-Command Start-DhcpDnsIntegration -ErrorAction SilentlyContinue) | Should Be $true
     }
 }
 
@@ -374,7 +374,6 @@ Describe 'Get-DhcpMenue / Fähigkeiten' {
             $f.DhcpRolle | Should Be $true
             $f.DhcpDienst | Should Be $true
             $f.DHCP | Should Be $true
-            $f.DhcpDatei | Should Be $true
         }
     }
     Context 'Server ohne DHCP-Rolle' {
@@ -495,8 +494,12 @@ Describe 'Dienstkonto für DNS-Updates' {
         Assert-MockCalled Add-Ergebnis -Times 0 -Exactly -ParameterFilter { "$Typ $Name $DN $Status $Info $Bezug" -match 'Geheim' }
         Assert-MockCalled Add-Ergebnis -ParameterFilter { $Typ -eq 'DHCP-DNS-Konto' -and $Status -eq 'OK' -and $Info -match 'nicht protokolliert' }
     }
-    It 'enthält kein Passwort im Code des Teilmoduls' {
-        $code = [System.IO.File]::ReadAllText((Join-Path (Join-Path (Join-Path $wurzel 'src') 'Module') 'DHCP.psm1'))
+    It 'enthält kein Passwort im DHCP-Teil des Scripts' {
+        $alles = [System.IO.File]::ReadAllText((Join-Path (Join-Path $wurzel 'src') 'AD-Schnellanlage.ps1'))
+        $start = $alles.IndexOf('# DHCP (Menü [H])')
+        $ende  = $alles.IndexOf('#region ======================= [P] PROTOKOLL')
+        $start | Should BeGreaterThan 0
+        $code = $alles.Substring($start, $ende - $start)
         $code | Should Not Match 'ConvertTo-SecureString'
         $code | Should Not Match 'AsPlainText'
     }

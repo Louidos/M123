@@ -1,8 +1,7 @@
 # Gruppenrichtlinien [G]
 
 Das Menü **[G]** legt einfache Gruppenrichtlinien (GPOs) an, ordnet Netzlaufwerke zu und
-setzt Standard-Richtlinien. Es steckt im Teilmodul `Module\GPO.psm1`, das neben
-`AD-Schnellanlage.ps1` liegen muss (siehe [README](../README.md#installation)).
+setzt Standard-Richtlinien. Es ist Teil von `AD-Schnellanlage.ps1` (eine Datei).
 
 Voraussetzungen: Active Directory und das Modul `GroupPolicy` (Windows-Feature **GPMC**,
 auf einem Domänencontroller meist schon da). Fehlt es, bietet **[G][7]** die Installation

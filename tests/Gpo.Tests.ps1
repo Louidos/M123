@@ -1,4 +1,4 @@
-﻿# Teilmodul GPO: reine Hilfsfunktionen, Drives.xml, Versionen, Vorlagen und Abläufe
+﻿# Gruppenrichtlinien [G]: reine Hilfsfunktionen, Drives.xml, Versionen, Vorlagen und Abläufe
 # (GroupPolicy- und AD-Befehle gemockt). Kompatibel mit Pester 3.4 und 4.x.
 
 $wurzel = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -28,10 +28,10 @@ $guid    = [guid]'6ac1786c-016f-11d2-945f-00c04fb984f9'
 $testGpo = [pscustomobject]@{ Id = $guid; DisplayName = 'Netzlaufwerke'; Path = 'cn={6AC1786C-016F-11D2-945F-00C04FB984F9},cn=policies,cn=system,DC=firma,DC=local' }
 $Domain  = [pscustomobject]@{ DNSRoot = 'firma.local'; NetBIOSName = 'FIRMA'; PDCEmulator = 'dc01.firma.local'; DistinguishedName = 'DC=firma,DC=local' }
 
-Describe 'Teilmodul GPO - Laden' {
-    It 'ist beim Dot-Sourcing geladen' {
-        $script:Teilmodule['GPO'] | Should Match 'GPO\.psm1$'
+Describe 'Gruppenrichtlinien im Script' {
+    It 'sind beim Dot-Sourcing des einen Scripts da' {
         [bool](Get-Command Start-GpoMenue -ErrorAction SilentlyContinue) | Should Be $true
+        [bool](Get-Command Set-GppLaufwerk -ErrorAction SilentlyContinue) | Should Be $true
     }
 }
 

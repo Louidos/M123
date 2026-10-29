@@ -9,8 +9,7 @@
     DhcpServer, ServerManager, SmbShare, NetTCPIP, DnsClient, .NET und - wenn vorhanden -
     Out-GridView. Keine externen Programme, kein Internet.
 
-    Groessere Bereiche liegen als Teilmodule in Module\<Name>.psm1 neben dem Script
-    (GPO, DHCP). Fehlt eine Datei, fehlt nur der zugehoerige Menuepunkt.
+    Alles steckt in dieser einen Datei - einfach auf den Server kopieren und starten.
 
     Das Script prueft beim Start, was auf dem Server vorhanden ist (Active Directory,
     DNS-Rolle, SMB, Auswahlfenster, Adminrechte). Menuepunkte, die hier nicht laufen
@@ -122,8 +121,8 @@ $Funktionen = [ordered]@{
     Mitgliedschaften    = $true   # [7]
     Rueckgaengig        = $true   # [8] (braucht Protokoll)
     DNS                 = $true   # [D] DNS-Menü
-    GPO                 = $true   # [G] Gruppenrichtlinien-Menü (Teilmodul Module\GPO.psm1)
-    DHCP                = $true   # [H] DHCP-Menü (Teilmodul Module\DHCP.psm1)
+    GPO                 = $true   # [G] Gruppenrichtlinien-Menü (braucht AD + Modul GroupPolicy)
+    DHCP                = $true   # [H] DHCP-Menü (Rolle wird im Menü installiert)
     Subnetzrechner      = $true   # [S] Subnetzrechner (braucht weder AD noch DNS)
     # Zusatzschritte in den Abläufen
     Schnelleingabe      = $true   # Benutzer: alle Namen in einer Zeile
@@ -2715,6 +2714,2159 @@ function Start-Einstellungen {
 }
 #endregion
 
+# ===================================================================
+# GRUPPENRICHTLINIEN (Menü [G])
+# Bordmittel: Module GroupPolicy (Feature GPMC), ActiveDirectory, SmbShare.
+# Laufwerkszuordnungen (Group Policy Preferences) kann das Modul GroupPolicy nicht -
+# dafür wird Drives.xml im SYSVOL selbst geschrieben, die Erweiterung in
+# gPCUserExtensionNames eingetragen und die Benutzerversion in AD und GPT.ini erhöht.
+# Aufbau und GUIDs: docs/GPO.md
+# ===================================================================
+
+# GUIDs der Laufwerkszuordnungen (Group Policy Preferences, Benutzerkonfiguration)
+$script:GppSammelCse    = '{00000000-0000-0000-0000-000000000000}'
+$script:GppLaufwerkCse  = '{5794DAFD-BE60-433F-88A2-1A31939AC01F}'
+$script:GppLaufwerkTool = '{2EA1A81B-48E5-45E9-8BB7-A6E3AC170006}'
+$script:GppDrivesClsid  = '{8FDDCC1A-0C3C-43cd-A6B4-71A6DF20DA8C}'
+$script:GppDriveClsid   = '{935D1B74-9CB8-4e3c-9914-7DD559B7A417}'
+$script:GppLaufwerkErweiterung = "[$script:GppSammelCse$script:GppLaufwerkTool][$script:GppLaufwerkCse$script:GppLaufwerkTool]"
+
+#region ======================= GPO-HILFSFUNKTIONEN (ohne Server) ====
+
+# "h", "H:", " h: " -> "H". Nur D bis Z (A/B Diskette, C System). Ungültig -> ''
+function ConvertTo-GpoLaufwerk([string]$Text) {
+    $t = "$Text".Trim().TrimEnd(':').ToUpper()
+    if ($t -match '^[D-Z]$') { return $t }
+    return ''
+}
+
+# UNC-Pfad prüfen: '' = in Ordnung, sonst der Fehler
+function Get-UncPfadFehler([string]$Pfad) {
+    $p = "$Pfad".Trim()
+    if (-not $p) { return 'darf nicht leer sein' }
+    if ($p -notmatch '^\\\\[^\\]') { return 'muss mit \\ beginnen, z.B. \\server\freigabe' }
+    $teile = @($p.Substring(2).TrimEnd('\') -split '\\')
+    if ($teile.Count -lt 2) { return 'braucht Server und Freigabe, z.B. \\server\freigabe' }
+    foreach ($t in $teile) {
+        if (-not $t) { return 'enthält \\ mitten im Pfad' }
+        if ($t -match '[/:*?"<>|]') { return "ungültige Zeichen in '$t' (/ : * ? `" < > |)" }
+    }
+    if ($teile[0] -notmatch '^[A-Za-z0-9][A-Za-z0-9.\-]*$') { return "ungültiger Servername '$($teile[0])'" }
+    return ''
+}
+
+# "\\srv01\Daten$\Abt" -> Server srv01, Freigabe Daten$, Rest Abt
+function Get-UncTeile([string]$Pfad) {
+    $teile = @("$Pfad".Trim().Substring(2).TrimEnd('\') -split '\\')
+    return [pscustomobject]@{
+        Server   = $teile[0]
+        Freigabe = $teile[1]
+        Rest     = (@($teile | Select-Object -Skip 2) -join '\')
+    }
+}
+
+# Liegt der Server aus dem UNC-Pfad auf diesem Rechner?
+function Test-UncAufDiesemServer([string]$Server) {
+    $s = "$Server".Trim().ToLower()
+    $ich = "$env:COMPUTERNAME".ToLower()
+    return ($s -eq $ich -or $s.StartsWith("$ich.") -or $s -in 'localhost', '127.0.0.1')
+}
+
+# Pfad für Dateien (z.B. Hintergrundbild): UNC, lokal (C:\...) oder mit Umgebungsvariable
+function Get-GpoPfadFehler([string]$Pfad) {
+    $p = "$Pfad".Trim()
+    if ($p.StartsWith('\\')) { return (Get-UncPfadFehler $p) }
+    if ($p -match '^[A-Za-z]:\\.+' -or $p -match '^%[A-Za-z_]+%\\.+') {
+        if ($p -match '[*?"<>|]') { return 'ungültige Zeichen (* ? " < > |)' }
+        return ''
+    }
+    return 'Pfad als \\server\freigabe\datei.jpg, C:\Ordner\datei.jpg oder %SystemRoot%\...'
+}
+
+# GUID der GPO in der Schreibweise von AD und SYSVOL: {6AC1786C-016F-11D2-945F-00C04FB984F9}
+function Get-GpoGuidText($Id) {
+    return '{' + "$Id".Trim('{', '}').ToUpper() + '}'
+}
+
+# gPCUserExtensionNames "[{CSE}{Tool}...][...]" -> geordnete Tabelle CSE -> Tool-GUIDs
+function ConvertFrom-GpoErweiterungen([string]$Text) {
+    $tabelle = [ordered]@{}
+    foreach ($m in [regex]::Matches("$Text", '\[([^\]]*)\]')) {
+        $guids = @([regex]::Matches($m.Groups[1].Value, '\{[0-9A-Fa-f\-]{36}\}') | ForEach-Object { $_.Value.ToUpper() })
+        if ($guids.Count -eq 0) { continue }
+        $cse = $guids[0]
+        if (-not $tabelle.Contains($cse)) { $tabelle[$cse] = [System.Collections.Generic.List[string]]::new() }
+        foreach ($g in @($guids | Select-Object -Skip 1)) {
+            if (-not $tabelle[$cse].Contains($g)) { $tabelle[$cse].Add($g) }
+        }
+    }
+    return $tabelle
+}
+
+# Erweiterungen zusammenführen: vorhandene bleiben, neue kommen dazu, alles nach GUID sortiert
+function Add-GpoErweiterung([string]$Vorhanden, [string]$Neu) {
+    $tabelle = ConvertFrom-GpoErweiterungen $Vorhanden
+    $dazu    = ConvertFrom-GpoErweiterungen $Neu
+    foreach ($cse in @($dazu.Keys)) {
+        if (-not $tabelle.Contains($cse)) { $tabelle[$cse] = [System.Collections.Generic.List[string]]::new() }
+        foreach ($g in $dazu[$cse]) { if (-not $tabelle[$cse].Contains($g)) { $tabelle[$cse].Add($g) } }
+    }
+    $teile = foreach ($cse in @($tabelle.Keys | Sort-Object)) {
+        '[' + $cse + (@($tabelle[$cse] | Sort-Object) -join '') + ']'
+    }
+    return (-join @($teile))
+}
+
+# versionNumber der GPO: obere 16 Bit = Benutzer, untere 16 Bit = Computer
+function Get-GpoVersionTeile([int]$Version) {
+    return [pscustomobject]@{ Benutzer = (($Version -shr 16) -band 0xFFFF); Computer = ($Version -band 0xFFFF) }
+}
+
+# Benutzerversion um 1 erhöhen, Computerversion bleibt (nach 65535 geht es mit 1 weiter)
+function Get-GpoVersionNeu([int]$Version) {
+    $t = Get-GpoVersionTeile $Version
+    $benutzer = ($t.Benutzer + 1) % 65536
+    if ($benutzer -eq 0) { $benutzer = 1 }
+    $wert = [int64]$benutzer * 65536 + $t.Computer
+    if ($wert -gt [int]::MaxValue) { $wert -= 4294967296 }
+    return [int]$wert
+}
+
+# Zeile "Version=" in GPT.ini setzen (fehlt sie, wird sie unter [General] ergänzt)
+function Set-GptIniVersion([string]$Text, [int]$Version) {
+    if ($Text -match '(?im)^Version=') { return ($Text -replace '(?im)^Version=-?\d*', "Version=$Version") }
+    if ($Text -match '(?im)^\[General\]\r?\n') { return ($Text -replace '(?im)^(\[General\]\r?\n)', "`${1}Version=$Version`r`n") }
+    return "[General]`r`nVersion=$Version`r`n$Text"
+}
+
+# gPLink eines AD-Objekts "[LDAP://cn={GUID},cn=policies,...;0][...]" -> GUID, Aktiviert, Erzwungen
+function ConvertFrom-GpLink([string]$Text) {
+    $liste = foreach ($m in [regex]::Matches("$Text", '\[LDAP://[^\]]*?(\{[0-9A-Fa-f\-]{36}\})[^\]]*;(\d+)\]')) {
+        $optionen = [int]$m.Groups[2].Value
+        [pscustomobject]@{
+            Guid      = $m.Groups[1].Value.ToUpper()
+            Aktiviert = -not ($optionen -band 1)
+            Erzwungen = [bool]($optionen -band 2)
+        }
+    }
+    return @($liste)
+}
+
+# ---- Drives.xml (Group Policy Preferences) ---------------------------
+
+function New-GppLaufwerkXml {
+    $xml = New-Object System.Xml.XmlDocument
+    $wurzel = $xml.CreateElement('Drives')
+    $wurzel.SetAttribute('clsid', $script:GppDrivesClsid)
+    [void]$xml.AppendChild($wurzel)
+    return , $xml
+}
+
+# Ein <Drive>-Element als Objekt
+function ConvertFrom-GppLaufwerk($Element) {
+    $p = $Element.SelectSingleNode('Properties')
+    $f = $Element.SelectSingleNode('Filters/FilterGroup')
+    $buchstabe = if ($p -and $p.GetAttribute('letter')) { $p.GetAttribute('letter') } else { "$($Element.GetAttribute('name'))".TrimEnd(':') }
+    return [pscustomobject]@{
+        Buchstabe   = $buchstabe.ToUpper()
+        Pfad        = if ($p) { $p.GetAttribute('path') } else { '' }
+        Bezeichnung = if ($p) { $p.GetAttribute('label') } else { '' }
+        Aktion      = if ($p) { $p.GetAttribute('action') } else { '' }
+        GruppeName  = if ($f) { $f.GetAttribute('name') } else { '' }
+        GruppeSid   = if ($f) { $f.GetAttribute('sid') } else { '' }
+        Uid         = $Element.GetAttribute('uid')
+    }
+}
+
+function Get-GppLaufwerkElemente([xml]$Xml) {
+    if (-not $Xml -or -not $Xml.DocumentElement) { return @() }
+    return @($Xml.DocumentElement.ChildNodes | Where-Object { $_.LocalName -eq 'Drive' })
+}
+
+# Alle Laufwerke einer Drives.xml
+function Get-GppLaufwerke([xml]$Xml) {
+    return @(Get-GppLaufwerkElemente $Xml | ForEach-Object { ConvertFrom-GppLaufwerk $_ })
+}
+
+# Laufwerk eintragen. Gleicher Buchstabe wird ersetzt (uid bleibt), nie doppelt.
+# Rückgabe: 'Neu', 'Vorhanden' (genau so schon da) oder 'Geaendert'
+function Set-GppLaufwerk {
+    param(
+        [xml]$Xml,
+        [string]$Buchstabe,
+        [string]$Pfad,
+        [string]$Bezeichnung = '',
+        [ValidateSet('C', 'R', 'U')][string]$Aktion = 'U',
+        [string]$GruppeName = '',
+        [string]$GruppeSid = '',
+        [string]$Zeit = ''
+    )
+    if (-not $Zeit) { $Zeit = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }
+    $Buchstabe = $Buchstabe.TrimEnd(':').ToUpper()
+    $alt = @(Get-GppLaufwerkElemente $Xml | Where-Object { (ConvertFrom-GppLaufwerk $_).Buchstabe -eq $Buchstabe }) | Select-Object -First 1
+    $uid = '{' + [guid]::NewGuid().ToString().ToUpper() + '}'
+    if ($alt) {
+        $v = ConvertFrom-GppLaufwerk $alt
+        if ($v.Pfad -eq $Pfad -and $v.Bezeichnung -ceq $Bezeichnung -and $v.Aktion -eq $Aktion -and $v.GruppeSid -eq $GruppeSid) { return 'Vorhanden' }
+        if ($v.Uid) { $uid = $v.Uid }
+    }
+    $bild = @{ C = '0'; R = '1'; U = '2' }[$Aktion]
+
+    $drive = $Xml.CreateElement('Drive')
+    $drive.SetAttribute('clsid', $script:GppDriveClsid)
+    $drive.SetAttribute('name', "${Buchstabe}:")
+    $drive.SetAttribute('status', "${Buchstabe}:")
+    $drive.SetAttribute('image', $bild)
+    $drive.SetAttribute('changed', $Zeit)
+    $drive.SetAttribute('uid', $uid)
+    $p = $Xml.CreateElement('Properties')
+    $p.SetAttribute('action', $Aktion)
+    $p.SetAttribute('thisDrive', 'NOCHANGE')
+    $p.SetAttribute('allDrives', 'NOCHANGE')
+    $p.SetAttribute('userName', '')
+    $p.SetAttribute('path', $Pfad)
+    $p.SetAttribute('label', $Bezeichnung)
+    $p.SetAttribute('persistent', '0')
+    $p.SetAttribute('useLetter', '1')
+    $p.SetAttribute('letter', $Buchstabe)
+    [void]$drive.AppendChild($p)
+    if ($GruppeSid) {
+        $filter = $Xml.CreateElement('Filters')
+        $g = $Xml.CreateElement('FilterGroup')
+        $g.SetAttribute('bool', 'AND')
+        $g.SetAttribute('not', '0')
+        $g.SetAttribute('name', $GruppeName)
+        $g.SetAttribute('sid', $GruppeSid)
+        $g.SetAttribute('userContext', '1')
+        $g.SetAttribute('primaryGroup', '0')
+        $g.SetAttribute('localGroup', '0')
+        [void]$filter.AppendChild($g)
+        [void]$drive.AppendChild($filter)
+    }
+    if ($alt) {
+        [void]$Xml.DocumentElement.ReplaceChild($drive, $alt)
+        return 'Geaendert'
+    }
+    [void]$Xml.DocumentElement.AppendChild($drive)
+    return 'Neu'
+}
+
+# Text der Datei, wie ihn die GPMC schreibt (Deklaration + eine Zeile)
+function ConvertTo-GppText([xml]$Xml) {
+    return '<?xml version="1.0" encoding="utf-8"?>' + "`r`n" + $Xml.DocumentElement.OuterXml
+}
+
+function Get-GpoAktionText([string]$Aktion) {
+    switch ($Aktion) {
+        'C' { return 'Erstellen' }
+        'R' { return 'Ersetzen' }
+        'U' { return 'Aktualisieren' }
+        'D' { return 'Löschen' }
+    }
+    return $Aktion
+}
+
+# ---- Standard-Richtlinien (Vorlagen) --------------------------------
+
+# Eingebaute Vorlagen. Erweiterbar über GPO-Richtlinien.json neben dem Script
+# (Beispiel: config/GPO-Richtlinien.example.json). {eingabe} wird durch die Antwort ersetzt.
+function Get-GpoStandardVorlagen {
+    return @(
+        @{
+            Name  = 'Systemsteuerung'
+            Text  = 'Systemsteuerung und PC-Einstellungen sperren'
+            Werte = @(@{ Schluessel = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoControlPanel'; Typ = 'DWord'; Wert = '1' })
+        }
+        @{
+            Name    = 'Desktophintergrund'
+            Text    = 'Desktophintergrund festlegen'
+            Hinweis = 'Das Bild muss für alle Benutzer lesbar sein, z.B. auf einer Freigabe oder in NETLOGON.'
+            Eingabe = @{ Frage = 'Pfad zum Bild, z.B. \\server\freigabe\hintergrund.jpg'; Art = 'Pfad' }
+            Werte   = @(
+                @{ Schluessel = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System'; Name = 'Wallpaper'; Typ = 'String'; Wert = '{eingabe}' }
+                @{ Schluessel = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System'; Name = 'WallpaperStyle'; Typ = 'String'; Wert = '4' }
+            )
+        }
+        @{
+            Name    = 'Eingabeaufforderung'
+            Text    = 'Eingabeaufforderung (cmd) sperren'
+            Hinweis = 'Anmeldescripts laufen weiterhin (DisableCMD = 2).'
+            Werte   = @(@{ Schluessel = 'HKCU\Software\Policies\Microsoft\Windows\System'; Name = 'DisableCMD'; Typ = 'DWord'; Wert = '2' })
+        }
+        @{
+            Name  = 'USB-Speicher'
+            Text  = 'USB-Speicher und alle Wechselmedien sperren'
+            Werte = @(@{ Schluessel = 'HKCU\Software\Policies\Microsoft\Windows\RemovableStorageDevices'; Name = 'Deny_All'; Typ = 'DWord'; Wert = '1' })
+        }
+        @{
+            Name    = 'Bildschirmsperre'
+            Text    = 'Bildschirmsperre nach X Minuten'
+            Eingabe = @{ Frage = 'Minuten bis zur Sperre'; Art = 'Zahl'; Standard = '10'; Min = 1; Max = 999; Faktor = 60 }
+            Werte   = @(
+                @{ Schluessel = 'HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop'; Name = 'ScreenSaveActive'; Typ = 'String'; Wert = '1' }
+                @{ Schluessel = 'HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop'; Name = 'ScreenSaverIsSecure'; Typ = 'String'; Wert = '1' }
+                @{ Schluessel = 'HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop'; Name = 'ScreenSaveTimeOut'; Typ = 'String'; Wert = '{eingabe}' }
+                @{ Schluessel = 'HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop'; Name = 'SCRNSAVE.EXE'; Typ = 'String'; Wert = 'scrnsave.scr' }
+            )
+        }
+    )
+}
+
+# Vorlage (Hashtable oder Objekt aus JSON) prüfen -> Vorlage oder Fehler
+function ConvertTo-GpoVorlage($Objekt) {
+    $e = [pscustomobject]@{ Vorlage = $null; Fehler = '' }
+    $name = "$($Objekt.Name)".Trim()
+    if (-not $name) { $e.Fehler = 'Eintrag ohne Name'; return $e }
+    $typen = 'String', 'ExpandString', 'DWord', 'QWord', 'MultiString'
+    $werte = [System.Collections.Generic.List[object]]::new()
+    foreach ($w in @($Objekt.Werte)) {
+        if ($null -eq $w) { continue }
+        $schluessel = "$($w.Schluessel)".Trim().TrimEnd('\')
+        if ($schluessel -notmatch '^(HKCU|HKLM)\\.+') { $e.Fehler = "'$name': Schlüssel muss mit HKCU\ oder HKLM\ beginnen ('$schluessel')"; return $e }
+        $typ = @($typen | Where-Object { $_ -eq "$($w.Typ)" }) | Select-Object -First 1
+        if (-not $typ) { $e.Fehler = "'$name': Typ '$($w.Typ)' unbekannt (erlaubt: $($typen -join ', '))"; return $e }
+        $wertName = "$($w.Name)".Trim()
+        if (-not $wertName) { $e.Fehler = "'$name': Wert ohne Name"; return $e }
+        $werte.Add([pscustomobject]@{ Schluessel = $schluessel; Name = $wertName; Typ = $typ; Wert = "$($w.Wert)" })
+    }
+    if ($werte.Count -eq 0) { $e.Fehler = "'$name': keine Werte"; return $e }
+
+    $mitPlatzhalter = @($werte | Where-Object { $_.Wert -match '\{eingabe\}' }).Count
+    $eingabe = $null
+    if ($Objekt.Eingabe) {
+        $art = @('Zahl', 'Pfad', 'Text' | Where-Object { $_ -eq "$($Objekt.Eingabe.Art)" }) | Select-Object -First 1
+        if (-not $art) { $e.Fehler = "'$name': Eingabe-Art '$($Objekt.Eingabe.Art)' unbekannt (Zahl, Pfad oder Text)"; return $e }
+        if (-not $mitPlatzhalter) { $e.Fehler = "'$name': Eingabe wird in keinem Wert als {eingabe} verwendet"; return $e }
+        $zahl = { param($Wert, [int]$Standard) $z = 0; if ([int]::TryParse("$Wert", [ref]$z)) { $z } else { $Standard } }
+        $eingabe = [pscustomobject]@{
+            Frage    = if ("$($Objekt.Eingabe.Frage)") { "$($Objekt.Eingabe.Frage)" } else { 'Wert' }
+            Art      = $art
+            Standard = "$($Objekt.Eingabe.Standard)"
+            Min      = & $zahl $Objekt.Eingabe.Min 0
+            Max      = & $zahl $Objekt.Eingabe.Max ([int]::MaxValue)
+            Faktor   = & $zahl $Objekt.Eingabe.Faktor 1
+        }
+    }
+    elseif ($mitPlatzhalter) { $e.Fehler = "'$name': {eingabe} ohne Eingabe-Angabe"; return $e }
+
+    $hklm = @($werte | Where-Object { $_.Schluessel -like 'HKLM\*' }).Count
+    $bereich = if ($hklm -eq $werte.Count) { 'Computer' } elseif ($hklm) { 'Benutzer + Computer' } else { 'Benutzer' }
+    $e.Vorlage = [pscustomobject]@{
+        Name    = $name
+        Text    = if ("$($Objekt.Text)".Trim()) { "$($Objekt.Text)".Trim() } else { $name }
+        Hinweis = "$($Objekt.Hinweis)"
+        Eingabe = $eingabe
+        Werte   = $werte.ToArray()
+        Bereich = $bereich
+    }
+    return $e
+}
+
+# JSON-Text {"Richtlinien": [...]} mit den Basis-Vorlagen zusammenführen (gleicher Name = ersetzt)
+function Merge-GpoVorlagenJson([string]$Json, [object[]]$Basis) {
+    $liste     = [System.Collections.Generic.List[object]]::new()
+    $warnungen = [System.Collections.Generic.List[string]]::new()
+    foreach ($b in $Basis) { $liste.Add($b) }
+    $ergebnis = [pscustomobject]@{ Vorlagen = $liste; Warnungen = $warnungen }
+    try { $objekt = ConvertFrom-Json -InputObject $Json -ErrorAction Stop }
+    catch { $warnungen.Add("GPO-Richtlinien.json ist fehlerhaft ($($_.Exception.Message)) - nur eingebaute Vorlagen."); return $ergebnis }
+    if (-not $objekt -or -not ($objekt.PSObject.Properties.Name -contains 'Richtlinien')) {
+        $warnungen.Add('GPO-Richtlinien.json: Eintrag "Richtlinien" fehlt - nur eingebaute Vorlagen.')
+        return $ergebnis
+    }
+    foreach ($o in @($objekt.Richtlinien)) {
+        $r = ConvertTo-GpoVorlage $o
+        if ($r.Fehler) { $warnungen.Add("GPO-Richtlinien.json: $($r.Fehler) - übersprungen."); continue }
+        $alt = @($liste | Where-Object { $_.Name -eq $r.Vorlage.Name }) | Select-Object -First 1
+        if ($alt) { $liste[$liste.IndexOf($alt)] = $r.Vorlage } else { $liste.Add($r.Vorlage) }
+    }
+    return $ergebnis
+}
+
+# Alle Vorlagen: eingebaute + GPO-Richtlinien.json ($Datei leer = neben dem Script)
+function Get-GpoVorlagen([string]$Datei = '') {
+    $basis = @(Get-GpoStandardVorlagen | ForEach-Object { (ConvertTo-GpoVorlage $_).Vorlage })
+    if (-not $Datei) {
+        if (-not $script:ScriptOrdner) { return $basis }
+        $Datei = Join-Path $script:ScriptOrdner 'GPO-Richtlinien.json'
+    }
+    if (-not (Test-Path -LiteralPath $Datei -PathType Leaf)) { return $basis }
+    $r = Merge-GpoVorlagenJson ([System.IO.File]::ReadAllText($Datei)) $basis
+    foreach ($w in $r.Warnungen) { Write-Warnung $w }
+    return @($r.Vorlagen)
+}
+
+# Antwort auf die Eingabe einer Vorlage prüfen ('' = in Ordnung)
+function Test-GpoVorlageEingabe($Eingabe, [string]$Text) {
+    $t = "$Text".Trim()
+    switch ($Eingabe.Art) {
+        'Zahl' {
+            $z = 0
+            if (-not [int]::TryParse($t, [ref]$z) -or $z -lt $Eingabe.Min -or $z -gt $Eingabe.Max) { return "Bitte eine ganze Zahl von $($Eingabe.Min) bis $($Eingabe.Max) eingeben." }
+        }
+        'Pfad' {
+            $f = Get-GpoPfadFehler $t
+            if ($f) { return "Ungültiger Pfad: $f" }
+        }
+        default { if (-not $t) { return 'Eingabe darf nicht leer sein.' } }
+    }
+    return ''
+}
+
+# Werte einer Vorlage mit eingesetzter Antwort und passendem Typ -> Werte + Fehler
+function Get-GpoVorlageWerte($Vorlage, [string]$Eingabe = '') {
+    $ergebnis = [pscustomobject]@{ Werte = @(); Fehler = '' }
+    $einsetzen = "$Eingabe".Trim()
+    if ($Vorlage.Eingabe -and $Vorlage.Eingabe.Art -eq 'Zahl') { $einsetzen = [string]([int64]$einsetzen * $Vorlage.Eingabe.Faktor) }
+    $liste = [System.Collections.Generic.List[object]]::new()
+    foreach ($w in $Vorlage.Werte) {
+        $text = $w.Wert.Replace('{eingabe}', $einsetzen)
+        $wert = $text
+        if ($w.Typ -eq 'DWord') {
+            $z = 0
+            if (-not [int]::TryParse($text, [ref]$z)) { $ergebnis.Fehler = "$($w.Name): '$text' ist keine Zahl (DWord)"; break }
+            $wert = $z
+        }
+        elseif ($w.Typ -eq 'QWord') {
+            $z = [int64]0
+            if (-not [int64]::TryParse($text, [ref]$z)) { $ergebnis.Fehler = "$($w.Name): '$text' ist keine Zahl (QWord)"; break }
+            $wert = $z
+        }
+        elseif ($w.Typ -eq 'MultiString') { $wert = [string[]]@($text -split '\|') }
+        $liste.Add([pscustomobject]@{ Schluessel = $w.Schluessel; Name = $w.Name; Typ = $w.Typ; Wert = $wert; Anzeige = $text })
+    }
+    if (-not $ergebnis.Fehler) { $ergebnis.Werte = $liste.ToArray() }
+    return $ergebnis
+}
+
+# ---- Bericht --------------------------------------------------------
+
+# Get-GPOReport -ReportType Xml -> kurze Zusammenfassung
+function Get-GpoBerichtInfo([xml]$Bericht) {
+    $lokal = { param([string]$Pfad) @(Select-Xml -Xml $Bericht -XPath $Pfad | ForEach-Object { $_.Node }) }
+    $text  = { param([string]$Pfad) $k = @(& $lokal $Pfad) | Select-Object -First 1; if ($k) { $k.InnerText } else { '' } }
+    $laufwerke = foreach ($d in @(& $lokal "//*[local-name()='User']//*[local-name()='Drive']")) {
+        $p = @($d.ChildNodes | Where-Object { $_.LocalName -eq 'Properties' }) | Select-Object -First 1
+        $pfad = if ($p) { $p.GetAttribute('path') } else { '' }
+        '{0} {1}' -f $d.GetAttribute('name'), $pfad
+    }
+    $einstellungen = @(& $lokal "//*[local-name()='Extension']//*[local-name()='Policy' or local-name()='RegistrySetting']").Count
+    $links = foreach ($l in @(& $lokal "//*[local-name()='LinksTo']")) {
+        $somPfad = @($l.ChildNodes | Where-Object { $_.LocalName -eq 'SOMPath' }) | Select-Object -First 1
+        $an      = @($l.ChildNodes | Where-Object { $_.LocalName -eq 'Enabled' }) | Select-Object -First 1
+        $zusatz  = if ($an -and $an.InnerText -eq 'false') { ' (deaktiviert)' } else { '' }
+        if ($somPfad) { "$($somPfad.InnerText)$zusatz" }
+    }
+    return [pscustomobject]@{
+        Name           = & $text "/*[local-name()='GPO']/*[local-name()='Name']"
+        BenutzerAd     = & $text "/*[local-name()='GPO']/*[local-name()='User']/*[local-name()='VersionDirectory']"
+        BenutzerSysvol = & $text "/*[local-name()='GPO']/*[local-name()='User']/*[local-name()='VersionSysvol']"
+        Laufwerke      = @($laufwerke)
+        Einstellungen  = $einstellungen
+        Links          = @($links)
+    }
+}
+#endregion
+
+#region ======================= GPO-SERVER ===========================
+
+# SYSVOL-Ordner der GPO auf dem PDC-Emulator - dort schreiben auch New-GPO und Set-GPRegistryValue
+function Get-GpoSysvolPfad($Gpo) {
+    $server = if ($Domain.PDCEmulator) { $Domain.PDCEmulator } else { $Domain.DNSRoot }
+    return "\\$server\SYSVOL\$($Domain.DNSRoot)\Policies\$(Get-GpoGuidText $Gpo.Id)"
+}
+
+function Get-GpoDrivesPfad($Gpo) {
+    return (Join-Path (Get-GpoSysvolPfad $Gpo) 'User\Preferences\Drives\Drives.xml')
+}
+
+# Vorhandene Drives.xml lesen (fehlt sie: neues, leeres Dokument)
+function Read-GppLaufwerkDatei($Gpo) {
+    $pfad = Get-GpoDrivesPfad $Gpo
+    if (-not (Test-Path -LiteralPath $pfad -PathType Leaf)) { return , (New-GppLaufwerkXml) }
+    $xml = [xml][System.IO.File]::ReadAllText($pfad)
+    return , $xml
+}
+
+function Save-GppLaufwerkDatei($Gpo, [xml]$Xml) {
+    $pfad   = Get-GpoDrivesPfad $Gpo
+    $ordner = Split-Path -Parent $pfad
+    if (-not (Test-Path -LiteralPath $ordner)) { New-Item -ItemType Directory -Path $ordner -Force -ErrorAction Stop | Out-Null }
+    [System.IO.File]::WriteAllText($pfad, (ConvertTo-GppText $Xml), [System.Text.UTF8Encoding]::new($false))
+}
+
+# Benutzerversion in AD (versionNumber) und GPT.ini gleich erhöhen, Erweiterung eintragen
+function Update-GpoBenutzerVersion($Gpo, [string]$Erweiterung = '') {
+    $ad = Get-ADObject -Identity $Gpo.Path -Properties versionNumber, gPCUserExtensionNames -ErrorAction Stop
+    $version  = Get-GpoVersionNeu ([int]$ad.versionNumber)
+    $ersetzen = @{ versionNumber = $version }
+    if ($Erweiterung) {
+        $neu = Add-GpoErweiterung "$($ad.gPCUserExtensionNames)" $Erweiterung
+        if ($neu -cne "$($ad.gPCUserExtensionNames)") { $ersetzen.gPCUserExtensionNames = $neu }
+    }
+    Set-ADObject -Identity $Gpo.Path -Replace $ersetzen -ErrorAction Stop
+    $ini  = Join-Path (Get-GpoSysvolPfad $Gpo) 'GPT.ini'
+    $kodierung = [System.Text.Encoding]::Default
+    $text = if (Test-Path -LiteralPath $ini -PathType Leaf) { [System.IO.File]::ReadAllText($ini, $kodierung) } else { "[General]`r`n" }
+    [System.IO.File]::WriteAllText($ini, (Set-GptIniVersion $text $version), $kodierung)
+    return $version
+}
+
+# Wo ist die GPO verknüpft? -> DN, Kurzpfad, Aktiviert
+function Get-GpoVerknuepfungen($Gpo) {
+    $guid = Get-GpoGuidText $Gpo.Id
+    $liste = foreach ($o in @(Get-ADObject -LDAPFilter "(gPLink=*$guid*)" -Properties gPLink -ErrorAction SilentlyContinue)) {
+        foreach ($l in @(ConvertFrom-GpLink $o.gPLink | Where-Object { $_.Guid -eq $guid })) {
+            [pscustomobject]@{ DN = $o.DistinguishedName; Pfad = (Get-Kurzpfad $o.DistinguishedName); Aktiviert = $l.Aktiviert }
+        }
+    }
+    return @($liste)
+}
+
+# GPO auswählen. $NeuVorschlag gesetzt = "(neue GPO anlegen)" anbieten.
+# Rückgabe: Gpo (vorhanden) oder Name (neu, wird erst nach der Bestätigung angelegt)
+function Select-Gpo([string]$Titel, [string]$NeuVorschlag = '') {
+    $gpos = @(Get-GPO -All -ErrorAction Stop | Sort-Object DisplayName)
+    if (-not $NeuVorschlag -and $gpos.Count -eq 0) { Write-Warnung 'Noch keine GPO vorhanden - zuerst unter [1] erstellen.'; Stop-Aktion }
+    $eintraege = @()
+    if ($NeuVorschlag) { $eintraege += [pscustomobject]@{ Anzeige = '(neue GPO anlegen)'; Gpo = $null } }
+    $eintraege += @($gpos | ForEach-Object {
+        [pscustomobject]@{ Anzeige = '{0,-40} geändert {1:dd.MM.yyyy HH:mm}' -f $_.DisplayName, $_.ModificationTime; Gpo = $_ }
+    })
+    $wahl = @(Select-AusListe -Eintraege $eintraege -Titel $Titel)
+    if ($wahl.Count -eq 0) { Stop-Aktion }
+    if ($wahl[0].Gpo) {
+        Write-Ok "GPO: $($wahl[0].Gpo.DisplayName)"
+        return [pscustomobject]@{ Gpo = $wahl[0].Gpo; Name = $wahl[0].Gpo.DisplayName }
+    }
+    return (Read-GpoName $NeuVorschlag)
+}
+
+# Name für eine neue GPO; gibt es sie schon, wird die vorhandene verwendet
+function Read-GpoName([string]$Vorschlag) {
+    while ($true) {
+        $name = Read-Text 'Name der GPO' $Vorschlag -Pflicht
+        if ($name.Length -gt 200) { Write-Warnung 'Höchstens 200 Zeichen.'; continue }
+        $vorhanden = Get-GPO -Name $name -ErrorAction SilentlyContinue
+        if ($vorhanden) {
+            Write-Info "Die GPO '$name' gibt es schon - sie wird verwendet, nichts wird doppelt angelegt."
+            return [pscustomobject]@{ Gpo = $vorhanden; Name = $name }
+        }
+        return [pscustomobject]@{ Gpo = $null; Name = $name }
+    }
+}
+
+# GPO anlegen (vorhanden -> VORHANDEN). Rückgabe: GPO oder $null
+function New-GpoObjekt([string]$Name, [string]$Kommentar = '') {
+    $vorhanden = Get-GPO -Name $Name -ErrorAction SilentlyContinue
+    if ($vorhanden) { Add-Ergebnis 'GPO' $Name $vorhanden.Path 'VORHANDEN'; return $vorhanden }
+    $param = @{ Name = $Name; ErrorAction = 'Stop' }
+    if ($Kommentar) { $param.Comment = $Kommentar }
+    try {
+        $gpo = New-GPO @param
+        Add-Ergebnis 'GPO' $Name $gpo.Path 'OK' -Bezug (Get-GpoGuidText $gpo.Id)
+        return $gpo
+    }
+    catch { Add-Ergebnis 'GPO' $Name '' 'FEHLER' $_.Exception.Message; return $null }
+}
+
+# Auswahl aus Select-Gpo auflösen: neue GPO jetzt anlegen
+function Resolve-GpoAuswahl($Auswahl) {
+    if ($Auswahl.Gpo) { return $Auswahl.Gpo }
+    return (New-GpoObjekt $Auswahl.Name 'Angelegt mit AD-Schnellanlage')
+}
+
+# GPO mit OU (oder Domänenstamm) verknüpfen und den Link aktivieren
+function Add-GpoLink($Gpo, [string]$ZielDN) {
+    $text = "$($Gpo.DisplayName) -> $(Get-Kurzpfad $ZielDN)"
+    try {
+        $link = @((Get-GPInheritance -Target $ZielDN -ErrorAction Stop).GpoLinks | Where-Object { "$($_.GpoId)" -eq "$($Gpo.Id)" }) | Select-Object -First 1
+        if ($link -and $link.Enabled) { Add-Ergebnis 'GPO-Link' $text $ZielDN 'VORHANDEN'; return }
+        if ($link) {
+            Set-GPLink -Guid $Gpo.Id -Target $ZielDN -LinkEnabled Yes -ErrorAction Stop | Out-Null
+            Add-Ergebnis 'GPO-Link' $text $ZielDN 'OK' 'war deaktiviert - jetzt aktiviert' -Bezug (Get-GpoGuidText $Gpo.Id)
+            return
+        }
+        New-GPLink -Guid $Gpo.Id -Target $ZielDN -LinkEnabled Yes -ErrorAction Stop | Out-Null
+        Add-Ergebnis 'GPO-Link' $text $ZielDN 'OK' -Bezug (Get-GpoGuidText $Gpo.Id)
+    }
+    catch { Add-Ergebnis 'GPO-Link' $text $ZielDN 'FEHLER' $_.Exception.Message }
+}
+
+# Nach einer Änderung: ist die GPO nirgends verknüpft, Verknüpfung anbieten
+function Invoke-GpoVerknuepfungAnbieten($Gpo) {
+    $links = @(Get-GpoVerknuepfungen $Gpo)
+    if ($links.Count) {
+        Write-Info "Verknüpft mit: $(($links | ForEach-Object { if ($_.Aktiviert) { $_.Pfad } else { "$($_.Pfad) (deaktiviert)" } }) -join ', ')"
+        return
+    }
+    Write-Warnung "Die GPO '$($Gpo.DisplayName)' ist noch nirgends verknüpft und wirkt deshalb nicht."
+    if (-not (Read-JaNein 'Jetzt mit einer OU verknüpfen?' $true)) { return }
+    $ziel = Select-AdZiel 'die Verknüpfung' -OhneContainer
+    if ($Funktionen.Vorschau -and -not (Read-JaNein "GPO '$($Gpo.DisplayName)' mit $(Get-Kurzpfad $ziel) verknüpfen?" $true)) { return }
+    Add-GpoLink $Gpo $ziel
+}
+
+function Show-GpoBericht($Info) {
+    Write-Host ''
+    Write-Host "  Bericht (Get-GPOReport): $($Info.Name)" -ForegroundColor Cyan
+    Write-Info "Benutzerversion AD / SYSVOL: $($Info.BenutzerAd) / $($Info.BenutzerSysvol)"
+    if ($Info.BenutzerAd -ne $Info.BenutzerSysvol) { Write-Warnung 'Versionen in AD und SYSVOL sind (noch) verschieden - nach der Replikation erneut prüfen.' }
+    if ($Info.Laufwerke.Count) { Write-Info "Laufwerkszuordnungen: $($Info.Laufwerke -join ', ')" }
+    Write-Info "Registry-Einstellungen: $($Info.Einstellungen)"
+    Write-Info ('Verknüpft mit: ' + $(if ($Info.Links.Count) { $Info.Links -join ', ' } else { 'nichts' }))
+}
+
+# Abschluss: Bericht zur Kontrolle, gpupdate anbieten
+function Invoke-GpoAbschluss($Gpo) {
+    try {
+        $bericht = [xml](Get-GPOReport -Guid $Gpo.Id -ReportType Xml -ErrorAction Stop)
+        Show-GpoBericht (Get-GpoBerichtInfo $bericht)
+    }
+    catch { Write-Warnung "Bericht nicht abrufbar: $($_.Exception.Message)" }
+    Write-Info 'Am Client: gpupdate /force, danach ab- und wieder anmelden (Laufwerke werden bei der Anmeldung verbunden).'
+    $pc = Read-Text 'Einen Client jetzt per Invoke-GPUpdate aktualisieren? Computername (Enter = nein)'
+    if (-not $pc) { return }
+    try {
+        Invoke-GPUpdate -Computer $pc -Force -RandomDelayInMinutes 0 -ErrorAction Stop
+        Write-Ok "gpupdate auf $pc angestoßen."
+    }
+    catch { Write-Warnung "Invoke-GPUpdate auf $pc fehlgeschlagen ($($_.Exception.Message)) - dort von Hand 'gpupdate /force' ausführen." }
+}
+
+# Freigabe auf diesem Server anlegen: Ordner + SMB-Freigabe + NTFS-Recht Ändern für die Gruppe
+function New-GpoFreigabe([string]$Unc, $Gruppe) {
+    $teile = Get-UncTeile $Unc
+    if ($teile.Rest) { Write-Warnung "Unterordner '$($teile.Rest)' bitte nach dem Anlegen der Freigabe von Hand erstellen." }
+    if (-not $script:Faehig.Smb) { Write-Warnung 'Modul SmbShare fehlt - Freigabe bitte von Hand anlegen.'; return $false }
+    if (Get-SmbShare -Name $teile.Freigabe -ErrorAction SilentlyContinue) { Add-Ergebnis 'Freigabe' $teile.Freigabe $Unc 'VORHANDEN'; return $true }
+    $vorschlag = "C:\Freigaben\$($teile.Freigabe.TrimEnd('$'))"
+    while ($true) {
+        $ordner = (Read-Text 'Lokaler Ordner für die Freigabe' $vorschlag -Pflicht).Trim('"')
+        if ($ordner -match '^[A-Za-z]:\\[^*?"<>|]*$') { break }
+        Write-Warnung 'Bitte einen lokalen Pfad angeben, z.B. D:\Freigaben\Daten'
+    }
+    $admins = ([System.Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate([System.Security.Principal.NTAccount]).Value
+    $wer    = if ($Gruppe) { $Gruppe.Name } else { Get-AuthentifizierteBenutzer }
+    $sid    = if ($Gruppe) { $Gruppe.Sid } else { [System.Security.Principal.SecurityIdentifier]'S-1-5-11' }
+    Write-Info 'Wird angelegt:'
+    Write-Host "    Ordner     $ordner" -ForegroundColor White
+    Write-Host "    Freigabe   \\$env:COMPUTERNAME\$($teile.Freigabe)   (Freigaberecht: $wer = Ändern, $admins = Vollzugriff)" -ForegroundColor White
+    Write-Host "    NTFS       $wer = Ändern" -ForegroundColor White
+    if (-not (Read-JaNein 'Ordner und Freigabe jetzt anlegen?' $true)) { return $false }
+    try {
+        if (-not (Test-Path -LiteralPath $ordner -PathType Container)) {
+            New-Item -ItemType Directory -Path $ordner -Force -ErrorAction Stop | Out-Null
+            Add-Ergebnis 'Ordner' $ordner $ordner 'OK'
+        }
+        Add-NtfsRegel -Pfad $ordner -Identitaet $sid -Recht 'Modify'
+        Add-Ergebnis 'NTFS' "$wer = Ändern" $ordner 'OK' 'M'
+        New-SmbShare -Name $teile.Freigabe -Path $ordner -ChangeAccess $wer -FullAccess $admins -FolderEnumerationMode AccessBased -ErrorAction Stop | Out-Null
+        Add-Ergebnis 'Freigabe' $teile.Freigabe $ordner 'OK'
+        return $true
+    }
+    catch { Add-Ergebnis 'Freigabe' $teile.Freigabe $ordner 'FEHLER' $_.Exception.Message; return $false }
+}
+
+# Gruppe für Item-Level-Targeting wählen (optional) -> Name (DOMÄNE\sam), Sid oder $null
+function Select-GpoZielgruppe {
+    if (-not (Read-JaNein 'Nur für Mitglieder einer bestimmten Gruppe (Zielgruppenadressierung)?' $false)) { return $null }
+    $dns = @(Select-AdObjekte -Art Gruppe -Titel 'Gruppe für die Zielgruppenadressierung wählen')
+    if ($dns.Count -eq 0) { return $null }
+    if ($dns.Count -gt 1) { Write-Warnung 'Es zählt nur die erste gewählte Gruppe.' }
+    $g = Get-ADGroup -Identity $dns[0] -ErrorAction Stop
+    $name = "$($Domain.NetBIOSName)\$($g.SamAccountName)"
+    Write-Ok "Zielgruppe: $name"
+    return [pscustomobject]@{ Name = $name; Sid = $g.SID; SidText = "$($g.SID)" }
+}
+#endregion
+
+#region ======================= MODUL [G] GRUPPENRICHTLINIEN ==========
+
+function Get-GpoMenue {
+    $f = $script:Faehig
+    return @(
+        [pscustomobject]@{ Taste = '1'; Text = 'GPO erstellen (optional gleich verknüpfen)';              An = $true; Braucht = @('GPO'); Aktion = { Start-GpoErstellen } }
+        [pscustomobject]@{ Taste = '2'; Text = 'Netzlaufwerk zuordnen (Einstellungen > Laufwerkszuordnungen)'; An = $true; Braucht = @('GPO'); Aktion = { Start-GpoNetzlaufwerk } }
+        [pscustomobject]@{ Taste = '3'; Text = 'Standard-Richtlinie anwenden (Systemsteuerung, USB, ...)'; An = $true; Braucht = @('GPO'); Aktion = { Start-GpoStandardRichtlinie } }
+        [pscustomobject]@{ Taste = '4'; Text = 'GPO mit OU verknüpfen';                                   An = $true; Braucht = @('GPO'); Aktion = { Start-GpoVerknuepfen } }
+        [pscustomobject]@{ Taste = '5'; Text = 'Vorhandene GPOs anzeigen';                                An = $true; Braucht = @('GPO'); Aktion = { Show-GpoListe } }
+        [pscustomobject]@{ Taste = '6'; Text = 'GPO entfernen';                                           An = $true; Braucht = @('GPO'); Aktion = { Start-GpoEntfernen } }
+        [pscustomobject]@{ Taste = '7'; Text = 'Gruppenrichtlinienverwaltung (GPMC) installieren';        An = (-not $f.GroupPolicy); Braucht = @('ServerManager'); Aktion = { Install-GpoVerwaltung } }
+    )
+}
+
+function Start-GpoMenue {
+    while ($true) {
+        $sichtbar = @()
+        $gruende  = @()
+        foreach ($m in @(Get-GpoMenue | Where-Object { $_.An })) {
+            $grund = Get-FehlendeFaehigkeit $m.Braucht $script:Faehig
+            if (-not $grund) { $sichtbar += $m }
+            elseif ($gruende -notcontains $grund) { $gruende += $grund }
+        }
+        Write-Titel "Gruppenrichtlinien   Domäne: $($Domain.DNSRoot)"
+        foreach ($m in $sichtbar) { Write-Host ('  [{0}] {1}' -f $m.Taste, $m.Text) }
+        Write-Host '  [0] Zurück zum Hauptmenü'
+        if ($gruende.Count) { Write-Host "  Weitere Punkte ausgeblendet: $($gruende -join ' / ')" -ForegroundColor DarkGray }
+        $wahl = "$(Read-Host '  Auswahl')".Trim().ToUpper()
+        if (-not $wahl -or $wahl -eq '0') { return }
+        $punkt = @($sichtbar | Where-Object { $_.Taste -eq $wahl }) | Select-Object -First 1
+        if (-not $punkt) { Write-Warnung 'Ungültige Auswahl.'; continue }
+        try { & $punkt.Aktion }
+        catch [System.OperationCanceledException] { Write-Warnung 'Abgebrochen - zurück zum GPO-Menü.' }
+        catch { Write-Host "  FEHLER: $($_.Exception.Message)" -ForegroundColor Red }
+    }
+}
+
+# [G][1]
+function Start-GpoErstellen {
+    Write-Titel 'GPO erstellen'
+    $auswahl = Read-GpoName 'Neue Richtlinie'
+    $gpo = $auswahl.Gpo
+    $kommentar = ''
+    if (-not $auswahl.Gpo) { $kommentar = Read-Text 'Kommentar (optional)' 'Angelegt mit AD-Schnellanlage' }
+    $ziel = ''
+    if (Read-JaNein 'Gleich mit einer OU verknüpfen?' $true) { $ziel = Select-AdZiel 'die Verknüpfung' -OhneContainer }
+    if ($Funktionen.Vorschau) {
+        Write-Info 'Wird erstellt:'
+        if ($auswahl.Gpo) { Write-Host "    GPO   $($auswahl.Name)   (vorhanden)" -ForegroundColor Yellow }
+        else { Write-Host "    GPO   $($auswahl.Name)" -ForegroundColor White }
+        if ($ziel) { Write-Host "    Link  -> $(Get-Kurzpfad $ziel)   (aktiviert)" -ForegroundColor White }
+        if (-not (Read-JaNein 'Jetzt erstellen?' $true)) { Stop-Aktion }
+    }
+    if (-not $auswahl.Gpo) { $gpo = New-GpoObjekt $auswahl.Name $kommentar }
+    if (-not $gpo) { return }
+    if ($ziel) { Add-GpoLink $gpo $ziel }
+}
+
+# [G][2] Abfrage eines Laufwerks -> Plan
+function Read-GpoLaufwerkPlan([object[]]$Vorhandene, [string[]]$Geplant) {
+    $belegt = @(@($Vorhandene | ForEach-Object { $_.Buchstabe }) + @($Geplant))
+    $vorschlag = @('H', 'S', 'P', 'T', 'G', 'K', 'L', 'M', 'N', 'O', 'Q', 'R', 'U', 'V', 'W', 'X', 'Y', 'Z' | Where-Object { $belegt -notcontains $_ }) | Select-Object -First 1
+    while ($true) {
+        $buchstabe = ConvertTo-GpoLaufwerk (Read-Text 'Laufwerksbuchstabe (D bis Z)' $vorschlag -Pflicht)
+        if (-not $buchstabe) { Write-Warnung 'Ungültiger Laufwerksbuchstabe - bitte D bis Z, z.B. H oder H:'; continue }
+        if ($Geplant -contains $buchstabe) { Write-Warnung "${buchstabe}: ist in diesem Durchlauf schon geplant."; continue }
+        break
+    }
+    $alt = @($Vorhandene | Where-Object { $_.Buchstabe -eq $buchstabe }) | Select-Object -First 1
+    if ($alt) { Write-Info "${buchstabe}: ist in dieser GPO schon zugeordnet: $($alt.Pfad) ($(Get-GpoAktionText $alt.Aktion))" }
+
+    $pfadVorschlag = if ($alt) { $alt.Pfad } else { '' }
+    while ($true) {
+        $pfad = (Read-Text 'UNC-Pfad, z.B. \\server\freigabe' $pfadVorschlag -Pflicht).Trim('"').TrimEnd('\')
+        $fehler = Get-UncPfadFehler $pfad
+        if ($fehler) { Write-Warnung "Ungültiger UNC-Pfad: $fehler"; continue }
+        break
+    }
+    $teile = Get-UncTeile $pfad
+    $bezVorschlag = if ($alt -and $alt.Bezeichnung) { $alt.Bezeichnung } else { $teile.Freigabe.TrimEnd('$') }
+    $bezeichnung = Read-Text 'Bezeichnung im Explorer' $bezVorschlag
+
+    Write-Host '  Aktion: [1] Erstellen  [2] Aktualisieren  [3] Ersetzen' -ForegroundColor Cyan
+    while ($true) {
+        $a = Read-Text 'Aktion' '2'
+        $aktion = @{ '1' = 'C'; '2' = 'U'; '3' = 'R'; 'e' = 'C'; 'erstellen' = 'C'; 'a' = 'U'; 'aktualisieren' = 'U'; 'ersetzen' = 'R' }[$a.ToLower()]
+        if ($aktion) { break }
+        Write-Warnung 'Bitte 1, 2 oder 3 eingeben.'
+    }
+    $gruppe = Select-GpoZielgruppe
+
+    # Erreichbarkeit der Freigabe
+    $erreichbar = Test-Path -LiteralPath $pfad
+    $freigabeNeu = $false
+    if (-not $erreichbar) {
+        Write-Warnung "$pfad ist von hier aus nicht erreichbar."
+        if ((Test-UncAufDiesemServer $teile.Server) -and (Read-JaNein 'Die Freigabe liegt auf diesem Server. Ordner und Freigabe jetzt anlegen?' $true)) {
+            $freigabeNeu = New-GpoFreigabe $pfad $gruppe
+        }
+        elseif (-not (Read-JaNein 'Trotzdem zuordnen (Freigabe wird später angelegt)?' $false)) { Stop-Aktion }
+    }
+    return [pscustomobject]@{
+        Buchstabe   = $buchstabe
+        Pfad        = $pfad
+        Bezeichnung = $bezeichnung
+        Aktion      = $aktion
+        Gruppe      = $gruppe
+        Alt         = $alt
+        Erreichbar  = ($erreichbar -or $freigabeNeu)
+    }
+}
+
+# [G][2]
+function Start-GpoNetzlaufwerk {
+    Write-Titel 'Netzlaufwerk per GPO zuordnen (Benutzerkonfiguration)'
+    $auswahl = Select-Gpo 'GPO für die Laufwerke wählen' 'Netzlaufwerke'
+    $vorhandene = @()
+    if ($auswahl.Gpo) {
+        $vorhandene = @(Get-GppLaufwerke (Read-GppLaufwerkDatei $auswahl.Gpo))
+        if ($vorhandene.Count) {
+            Write-Info 'Schon in dieser GPO:'
+            foreach ($v in $vorhandene) { Write-Host ('    {0}:  {1,-36} {2,-14} {3}' -f $v.Buchstabe, $v.Pfad, (Get-GpoAktionText $v.Aktion), $v.GruppeName) -ForegroundColor Gray }
+        }
+    }
+    $plaene = [System.Collections.Generic.List[object]]::new()
+    while ($true) {
+        Write-Host ''
+        Write-Host "  -- Laufwerk $($plaene.Count + 1) --" -ForegroundColor Cyan
+        $plaene.Add((Read-GpoLaufwerkPlan $vorhandene @($plaene | ForEach-Object { $_.Buchstabe })))
+        if (-not (Read-JaNein 'Weiteres Laufwerk in dieselbe GPO?' $false)) { break }
+    }
+
+    Write-Titel "Vorschau: GPO '$($auswahl.Name)'$(if (-not $auswahl.Gpo) { ' (neu)' })"
+    $arbeit = [System.Collections.Generic.List[object]]::new()
+    $ohne   = [System.Collections.Generic.List[object]]::new()   # vorhanden oder übersprungen: Status, Info
+    foreach ($p in $plaene) {
+        $ziel = if ($p.Gruppe) { "nur $($p.Gruppe.Name)" } else { 'alle Benutzer' }
+        $text = '    {0}:  {1,-36} "{2}"  {3}, {4}' -f $p.Buchstabe, $p.Pfad, $p.Bezeichnung, (Get-GpoAktionText $p.Aktion), $ziel
+        $gleich = $p.Alt -and $p.Alt.Pfad -eq $p.Pfad -and $p.Alt.Bezeichnung -ceq $p.Bezeichnung -and $p.Alt.Aktion -eq $p.Aktion -and $p.Alt.GruppeSid -eq $(if ($p.Gruppe) { $p.Gruppe.SidText } else { '' })
+        if ($gleich) {
+            Write-Host "$text   (vorhanden)" -ForegroundColor Yellow
+            $ohne.Add([pscustomobject]@{ Plan = $p; Status = 'VORHANDEN'; Info = '' })
+            continue
+        }
+        if ($p.Alt) {
+            Write-Host "$text   (ersetzt bisher $($p.Alt.Pfad))" -ForegroundColor White
+            if (-not (Read-JaNein "Vorhandene Zuordnung $($p.Buchstabe): ersetzen?" $true)) {
+                $ohne.Add([pscustomobject]@{ Plan = $p; Status = 'UEBERSPRUNGEN'; Info = 'vorhandene Zuordnung behalten' })
+                continue
+            }
+        }
+        else { Write-Host $text -ForegroundColor White }
+        if (-not $p.Erreichbar) { Write-Host '          (Pfad zurzeit nicht erreichbar)' -ForegroundColor DarkYellow }
+        $arbeit.Add($p)
+    }
+    if ($arbeit.Count -and $Funktionen.Vorschau -and -not (Read-JaNein 'Jetzt in die GPO schreiben?' $true)) { Stop-Aktion }
+    foreach ($o in $ohne) { Add-Ergebnis 'GPO-Laufwerk' "$($o.Plan.Buchstabe): -> $($o.Plan.Pfad)" $auswahl.Name $o.Status $o.Info }
+    if ($arbeit.Count -eq 0) {
+        Write-Info 'Nichts zu ändern - nichts wird doppelt angelegt.'
+        if ($auswahl.Gpo) { Invoke-GpoVerknuepfungAnbieten $auswahl.Gpo }
+        return
+    }
+
+    $gpo = Resolve-GpoAuswahl $auswahl
+    if (-not $gpo) { return }
+    try {
+        $xml = Read-GppLaufwerkDatei $gpo
+        $status = @{}
+        foreach ($p in $arbeit) {
+            $gName = if ($p.Gruppe) { $p.Gruppe.Name } else { '' }
+            $gSid  = if ($p.Gruppe) { $p.Gruppe.SidText } else { '' }
+            $status[$p.Buchstabe] = Set-GppLaufwerk -Xml $xml -Buchstabe $p.Buchstabe -Pfad $p.Pfad -Bezeichnung $p.Bezeichnung -Aktion $p.Aktion -GruppeName $gName -GruppeSid $gSid
+        }
+        Save-GppLaufwerkDatei $gpo $xml
+        $version = Update-GpoBenutzerVersion $gpo $script:GppLaufwerkErweiterung
+        foreach ($p in $arbeit) {
+            $info = switch ($status[$p.Buchstabe]) { 'Geaendert' { 'ersetzt' } 'Vorhanden' { 'unverändert' } default { Get-GpoAktionText $p.Aktion } }
+            Add-Ergebnis 'GPO-Laufwerk' "$($p.Buchstabe): -> $($p.Pfad)" $gpo.DisplayName 'OK' $info -Bezug (Get-GpoGuidText $gpo.Id)
+        }
+        Write-Info "Benutzerversion der GPO jetzt $((Get-GpoVersionTeile $version).Benutzer) (AD und GPT.ini)."
+    }
+    catch {
+        Add-Ergebnis 'GPO-Laufwerk' (($arbeit | ForEach-Object { "$($_.Buchstabe):" }) -join ' ') $gpo.DisplayName 'FEHLER' $_.Exception.Message
+        return
+    }
+    Invoke-GpoVerknuepfungAnbieten $gpo
+    Invoke-GpoAbschluss $gpo
+}
+
+# [G][3]
+function Start-GpoStandardRichtlinie {
+    Write-Titel 'Standard-Richtlinie anwenden'
+    $vorlagen = @(Get-GpoVorlagen)
+    $eintraege = @($vorlagen | ForEach-Object { [pscustomobject]@{ Anzeige = '{0,-46} ({1})' -f $_.Text, $_.Bereich; Vorlage = $_ } })
+    $wahl = @(Select-AusListe -Eintraege $eintraege -Titel 'Welche Richtlinie(n)?' -Mehrfach)
+    if ($wahl.Count -eq 0) { Stop-Aktion }
+    $auswahl = Select-Gpo 'GPO für die Richtlinie(n) wählen' 'Standard-Richtlinien'
+
+    $plaene = [System.Collections.Generic.List[object]]::new()
+    foreach ($w in $wahl) {
+        $v = $w.Vorlage
+        Write-Host ''
+        Write-Host "  -- $($v.Text) --" -ForegroundColor Cyan
+        if ($v.Hinweis) { Write-Info $v.Hinweis }
+        if ($v.Bereich -ne 'Benutzer') { Write-Info 'Computerkonfiguration: wirkt nur, wenn die Computerkonten in der verknüpften OU liegen.' }
+        $antwort = ''
+        if ($v.Eingabe) {
+            while ($true) {
+                $antwort = Read-Text $v.Eingabe.Frage $v.Eingabe.Standard -Pflicht
+                $fehler = Test-GpoVorlageEingabe $v.Eingabe $antwort
+                if (-not $fehler) { break }
+                Write-Warnung $fehler
+            }
+        }
+        $r = Get-GpoVorlageWerte $v $antwort
+        if ($r.Fehler) { Write-Warnung "$($v.Name): $($r.Fehler) - übersprungen."; continue }
+        foreach ($wert in $r.Werte) {
+            $aktuell = $null
+            if ($auswahl.Gpo) {
+                # fehlt der Wert, meldet Get-GPRegistryValue einen Fehler -> gilt als "neu"
+                try { $aktuell = Get-GPRegistryValue -Guid $auswahl.Gpo.Id -Key $wert.Schluessel -ValueName $wert.Name -ErrorAction Stop } catch { $aktuell = $null }
+            }
+            $art = 'Neu'
+            if ($aktuell -and "$(@($aktuell.Value) -join '|')" -eq $wert.Anzeige) { $art = 'Vorhanden' }
+            elseif ($aktuell) { $art = 'Aendern' }
+            $plaene.Add([pscustomobject]@{ Vorlage = $v.Name; Wert = $wert; Art = $art; Vorher = $(if ($aktuell) { "$(@($aktuell.Value) -join '|')" } else { '' }) })
+        }
+    }
+    if ($plaene.Count -eq 0) { Stop-Aktion }
+
+    Write-Titel "Vorschau: GPO '$($auswahl.Name)'$(if (-not $auswahl.Gpo) { ' (neu)' })"
+    foreach ($p in $plaene) {
+        $text = '    {0,-20} {1}\{2} = {3} ({4})' -f $p.Vorlage, $p.Wert.Schluessel, $p.Wert.Name, $p.Wert.Anzeige, $p.Wert.Typ
+        switch ($p.Art) {
+            'Vorhanden' { Write-Host "$text   (vorhanden)" -ForegroundColor Yellow }
+            'Aendern'   { Write-Host "$text   (bisher: $($p.Vorher))" -ForegroundColor White }
+            default     { Write-Host $text -ForegroundColor White }
+        }
+    }
+    $neu = @($plaene | Where-Object { $_.Art -ne 'Vorhanden' })
+    if ($neu.Count -eq 0) {
+        foreach ($p in $plaene) { Add-Ergebnis 'GPO-Wert' "$($p.Vorlage): $($p.Wert.Name)" $auswahl.Name 'VORHANDEN' $p.Wert.Anzeige }
+        Write-Info 'Alles ist schon so eingestellt.'
+        if ($auswahl.Gpo) { Invoke-GpoVerknuepfungAnbieten $auswahl.Gpo }
+        return
+    }
+    if ($Funktionen.Vorschau -and -not (Read-JaNein 'Jetzt in die GPO schreiben?' $true)) { Stop-Aktion }
+
+    $gpo = Resolve-GpoAuswahl $auswahl
+    if (-not $gpo) { return }
+    foreach ($p in $plaene) {
+        $name = "$($p.Vorlage): $($p.Wert.Name)"
+        if ($p.Art -eq 'Vorhanden') { Add-Ergebnis 'GPO-Wert' $name $gpo.DisplayName 'VORHANDEN' $p.Wert.Anzeige; continue }
+        try {
+            Set-GPRegistryValue -Guid $gpo.Id -Key $p.Wert.Schluessel -ValueName $p.Wert.Name -Type $p.Wert.Typ -Value $p.Wert.Wert -ErrorAction Stop | Out-Null
+            $info = if ($p.Art -eq 'Aendern') { "$($p.Wert.Anzeige) (vorher $($p.Vorher))" } else { $p.Wert.Anzeige }
+            Add-Ergebnis 'GPO-Wert' $name $gpo.DisplayName 'OK' $info -Bezug "$($p.Wert.Schluessel)|$($p.Wert.Name)"
+        }
+        catch { Add-Ergebnis 'GPO-Wert' $name $gpo.DisplayName 'FEHLER' $_.Exception.Message }
+    }
+    Invoke-GpoVerknuepfungAnbieten $gpo
+    Invoke-GpoAbschluss $gpo
+}
+
+# [G][4]
+function Start-GpoVerknuepfen {
+    Write-Titel 'GPO mit OU verknüpfen'
+    $gpo = (Select-Gpo 'Welche GPO verknüpfen?').Gpo
+    $links = @(Get-GpoVerknuepfungen $gpo)
+    if ($links.Count) { Write-Info "Bisher verknüpft mit: $(($links | ForEach-Object { $_.Pfad }) -join ', ')" }
+    $ziel = Select-AdZiel 'die Verknüpfung' -OhneContainer
+    if ($Funktionen.Vorschau -and -not (Read-JaNein "GPO '$($gpo.DisplayName)' mit $(Get-Kurzpfad $ziel) verknüpfen (aktiviert)?" $true)) { Stop-Aktion }
+    Add-GpoLink $gpo $ziel
+}
+
+# [G][5]
+function Show-GpoListe {
+    Write-Titel 'Vorhandene GPOs'
+    $gpos = @(Get-GPO -All -ErrorAction Stop | Sort-Object DisplayName)
+    if ($gpos.Count -eq 0) { Write-Info 'Keine GPOs vorhanden.'; return }
+    # Verknüpfungen einmal für alle lesen
+    $links = @{}
+    foreach ($o in @(Get-ADObject -LDAPFilter '(gPLink=*)' -Properties gPLink -ErrorAction SilentlyContinue)) {
+        foreach ($l in @(ConvertFrom-GpLink $o.gPLink)) {
+            $text = Get-Kurzpfad $o.DistinguishedName
+            if (-not $l.Aktiviert) { $text += ' (aus)' }
+            $links[$l.Guid] = @($links[$l.Guid]) + $text
+        }
+    }
+    $gpos | ForEach-Object {
+        $verkn = @($links[(Get-GpoGuidText $_.Id)] | Where-Object { $_ })
+        [pscustomobject]@{
+            Name            = $_.DisplayName
+            Status          = "$($_.GpoStatus)"
+            Geaendert       = '{0:dd.MM.yyyy HH:mm}' -f $_.ModificationTime
+            'Verknüpft mit' = if ($verkn.Count) { $verkn -join ', ' } else { '-' }
+        }
+    } | Format-Table -AutoSize -Wrap | Out-Host
+}
+
+# [G][6]
+function Start-GpoEntfernen {
+    Write-Titel 'GPO entfernen'
+    $gpo = (Select-Gpo 'Welche GPO entfernen?').Gpo
+    $links = @(Get-GpoVerknuepfungen $gpo)
+    Write-Info "GPO: $($gpo.DisplayName)  $(Get-GpoGuidText $gpo.Id)"
+    Write-Info ('Verknüpft mit: ' + $(if ($links.Count) { ($links | ForEach-Object { $_.Pfad }) -join ', ' } else { 'nichts' }))
+    Write-Warnung 'Die GPO wird mit allen Einstellungen und Verknüpfungen GELÖSCHT (Remove-GPO).'
+    if ("$(Read-Host "  Zum Bestätigen 'JA' eingeben")".Trim() -cne 'JA') { Stop-Aktion }
+    try {
+        Remove-GPO -Guid $gpo.Id -ErrorAction Stop
+        Add-Ergebnis 'GPO' $gpo.DisplayName $gpo.Path 'ENTFERNT' -Bezug (Get-GpoGuidText $gpo.Id)
+    }
+    catch { Add-Ergebnis 'GPO' $gpo.DisplayName $gpo.Path 'FEHLER' $_.Exception.Message }
+}
+
+# [G][7]
+function Install-GpoVerwaltung {
+    Write-Titel 'Gruppenrichtlinienverwaltung installieren'
+    if (Install-WindowsRolle -Feature 'GPMC' -Typ 'GPO-Rolle' -Text 'Gruppenrichtlinienverwaltung (GPMC) mit Modul GroupPolicy') {
+        if ($script:Faehig.GPO) { Write-Ok 'Modul GroupPolicy ist jetzt verfügbar - alle Punkte unter [G] stehen bereit.' }
+        else { Write-Warnung "GPO noch nicht nutzbar: $($script:Faehig.Grund.GPO)" }
+    }
+}
+#endregion
+
+# ===================================================================
+# DHCP (Menü [H])
+# Bordmittel: Module DhcpServer (Feature DHCP), ServerManager, NetTCPIP, ActiveDirectory,
+# DnsServer (DNS-Integration). Annahme: DHCP läuft auf diesem Server (Domänencontroller
+# mit DNS), nur IPv4. Ablauf, Prüfungen und DNS-Integration: docs/DHCP.md
+# ===================================================================
+
+# Registry-Schlüssel des Server-Managers für die DHCP-Rolle ("Konfiguration abschließen")
+$script:DhcpServerManagerSchluessel = 'HKLM:\SOFTWARE\Microsoft\ServerManager\Roles\12'
+
+#region ======================= DHCP-HILFSFUNKTIONEN (ohne Server) ===
+
+# MAC-Adresse in beliebiger Schreibweise -> "00-11-22-aa-bb-cc" (ungültig -> '')
+# Erlaubt: 00:11:22:AA:BB:CC, 00-11-22-aa-bb-cc, 0011.22aa.bbcc, 001122AABBCC, mit Leerzeichen
+function ConvertTo-MacAdresse([string]$Text) {
+    $roh = ("$Text".Trim() -replace '[\s:\-\.]', '').ToLower()
+    if ($roh -notmatch '^[0-9a-f]{12}$') { return '' }
+    return (($roh -split '(..)' | Where-Object { $_ }) -join '-')
+}
+
+# Lease-Dauer: "8" = 8 Tage, "8d", "12h", "30m", "1.12:00:00" oder "12:00:00" -> TimeSpan ($null = ungültig)
+function ConvertTo-LeaseDauer([string]$Text) {
+    $t = "$Text".Trim().ToLower()
+    $dauer = $null
+    if ($t -match '^(\d{1,3})\s*(d|t|tag|tage)?$')  { $dauer = [TimeSpan]::FromDays([int]$Matches[1]) }
+    elseif ($t -match '^(\d{1,5})\s*(h|std)$')     { $dauer = [TimeSpan]::FromHours([int]$Matches[1]) }
+    elseif ($t -match '^(\d{1,6})\s*(m|min)$')     { $dauer = [TimeSpan]::FromMinutes([int]$Matches[1]) }
+    elseif ($t -match '^(\d+\.)?\d{1,2}:\d{2}:\d{2}$') {
+        $z = [TimeSpan]::Zero
+        if ([TimeSpan]::TryParse($t, [ref]$z)) { $dauer = $z }
+    }
+    if ($null -eq $dauer) { return $null }
+    if ($dauer.TotalMinutes -lt 1 -or $dauer.TotalDays -gt 999) { return $null }
+    return $dauer
+}
+
+# TimeSpan -> "8 Tage", "12 Stunden", "1 Tag 12 Stunden"
+function Format-LeaseDauer([TimeSpan]$Dauer) {
+    $teile = [System.Collections.Generic.List[string]]::new()
+    foreach ($t in @(@($Dauer.Days, 'Tag', 'Tage'), @($Dauer.Hours, 'Stunde', 'Stunden'), @($Dauer.Minutes, 'Minute', 'Minuten'))) {
+        if ($t[0] -eq 1) { $teile.Add("1 $($t[1])") }
+        elseif ($t[0]) { $teile.Add("$($t[0]) $($t[2])") }
+    }
+    if ($teile.Count -eq 0) { return '0 Minuten' }
+    return ($teile -join ' ')
+}
+
+# "192.168.10.150-192.168.10.155, 192.168.10.180" -> Liste Start/Ende ('-' oder leer = keine)
+function ConvertFrom-DhcpAusschlussText([string]$Text) {
+    $e = [pscustomobject]@{ Bereiche = @(); Fehler = '' }
+    $t = "$Text".Trim()
+    if ($t -in '', '-', 'keine') { return $e }
+    $liste = [System.Collections.Generic.List[object]]::new()
+    foreach ($teil in @($t -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        $ab = @($teil -split '\s*-\s*')
+        if ($ab.Count -gt 2) { $e.Fehler = "'$teil': Format 192.168.10.150-192.168.10.155 oder eine einzelne Adresse"; return $e }
+        $von = $ab[0]
+        $bis = if ($ab.Count -eq 2) { $ab[1] } else { $ab[0] }
+        if ($null -eq (ConvertTo-IpZahl $von) -or $null -eq (ConvertTo-IpZahl $bis)) { $e.Fehler = "'$teil': keine gültige IPv4-Adresse"; return $e }
+        if ((ConvertTo-IpZahl $von) -gt (ConvertTo-IpZahl $bis)) { $e.Fehler = "'$teil': Anfang liegt hinter dem Ende"; return $e }
+        $liste.Add([pscustomobject]@{ Start = $von; Ende = $bis })
+    }
+    $e.Bereiche = $liste.ToArray()
+    return $e
+}
+
+function Format-DhcpAusschluesse([object[]]$Bereiche) {
+    $liste = @($Bereiche | Where-Object { $_ } | ForEach-Object { if ($_.Start -eq $_.Ende) { $_.Start } else { "$($_.Start)-$($_.Ende)" } })
+    if ($liste.Count -eq 0) { return '-' }
+    return ($liste -join ', ')
+}
+
+# Vorschlag für einen Bereich aus der IP des Servers: Netz, /24 -> .100 bis .200, Router = erste
+# Adresse im Netz, DNS = eigene IP, Domäne aus AD, Lease 8 Tage
+function Get-DhcpVorschlag([string]$Ip, [int]$Praefix, [string]$Domaene = '') {
+    if ($Praefix -lt 8 -or $Praefix -gt 30) { $Praefix = 24 }
+    $info  = Get-SubnetzInfo -Ip (ConvertTo-IpZahl $Ip) -Praefix $Praefix
+    $netz  = ConvertTo-IpZahl $info.Netz
+    if ($info.Hosts -ge 254) { $start = $netz + 100; $ende = $netz + 200 }
+    else {
+        $start = (ConvertTo-IpZahl $info.ErsterHost) + [int64][Math]::Floor($info.Hosts / 2)
+        $ende  = ConvertTo-IpZahl $info.LetzterHost
+    }
+    return [pscustomobject]@{
+        Name          = "LAN $($info.Netz)"
+        Netz          = $info.Netz
+        Praefix       = $Praefix
+        Maske         = $info.Maske
+        Start         = ConvertTo-IpText $start
+        Ende          = ConvertTo-IpText $ende
+        Ausschluesse  = @()
+        LeaseDauer    = [TimeSpan]::FromDays(8)
+        Router        = $info.ErsterHost
+        DnsServer     = @($Ip)
+        Domaene       = $Domaene
+        Reservierungen = @()
+        Vorhanden     = $null
+    }
+}
+
+# Liegt $Zahl in einem der Bereiche (Start/Ende als Text)?
+function Test-IpInBereichen([int64]$Zahl, [object[]]$Bereiche) {
+    foreach ($b in @($Bereiche | Where-Object { $_ })) {
+        if ($Zahl -ge (ConvertTo-IpZahl $b.Start) -and $Zahl -le (ConvertTo-IpZahl $b.Ende)) { return $true }
+    }
+    return $false
+}
+
+# Bereich prüfen. Rückgabe: Fehler (Liste), Hinweise (Liste), Vorschlaege (Ausschlüsse mit Grund),
+# Vorhanden (vorhandener Bereich mit genau diesem Netz oder $null)
+function Test-DhcpBereichPlan($Plan, [object[]]$Vorhandene = @(), [string[]]$ServerIps = @()) {
+    $e = [pscustomobject]@{
+        Fehler      = [System.Collections.Generic.List[string]]::new()
+        Hinweise    = [System.Collections.Generic.List[string]]::new()
+        Vorschlaege = [System.Collections.Generic.List[object]]::new()
+        Vorhanden   = $null
+    }
+    $netz    = ConvertTo-IpZahl $Plan.Netz
+    $praefix = Get-PraefixAusEingabe "$($Plan.Maske)"
+    if ($null -eq $netz) { $e.Fehler.Add("Netz: '$($Plan.Netz)' ist keine gültige IPv4-Adresse."); return $e }
+    if ($null -eq $praefix) { $e.Fehler.Add("Maske: '$($Plan.Maske)' ist keine gültige Subnetzmaske (z.B. 255.255.255.0 oder /24)."); return $e }
+    if ($praefix -lt 8 -or $praefix -gt 30) { $e.Fehler.Add("Maske: /$praefix geht nicht - für DHCP /8 bis /30."); return $e }
+    $info = Get-SubnetzInfo -Ip $netz -Praefix $praefix
+    if ($info.Netz -ne $Plan.Netz) { $e.Fehler.Add("Netz: $($Plan.Netz) ist keine Netzadresse für /$praefix - gemeint ist wohl $($info.Netz)."); return $e }
+    $nA = $netz
+    $bA = ConvertTo-IpZahl $info.Broadcast
+    $erlaubt = "erlaubt $($info.ErsterHost) bis $($info.LetzterHost)"
+
+    $start = ConvertTo-IpZahl $Plan.Start
+    $ende  = ConvertTo-IpZahl $Plan.Ende
+    if ($null -eq $start) { $e.Fehler.Add("Start: '$($Plan.Start)' ist keine gültige IPv4-Adresse.") }
+    elseif ($start -le $nA -or $start -ge $bA) { $e.Fehler.Add("Start: $($Plan.Start) liegt nicht im Netz $($info.Netz)/$praefix ($erlaubt).") }
+    if ($null -eq $ende) { $e.Fehler.Add("Ende: '$($Plan.Ende)' ist keine gültige IPv4-Adresse.") }
+    elseif ($ende -le $nA -or $ende -ge $bA) { $e.Fehler.Add("Ende: $($Plan.Ende) liegt nicht im Netz $($info.Netz)/$praefix ($erlaubt).") }
+    if ($e.Fehler.Count -eq 0 -and $start -gt $ende) { $e.Fehler.Add("Start $($Plan.Start) liegt hinter dem Ende $($Plan.Ende).") }
+
+    $router = $null
+    if ($Plan.Router) {
+        $router = ConvertTo-IpZahl $Plan.Router
+        if ($null -eq $router) { $e.Fehler.Add("Router: '$($Plan.Router)' ist keine gültige IPv4-Adresse.") }
+        elseif ($router -le $nA -or $router -ge $bA) { $e.Fehler.Add("Router: $($Plan.Router) liegt nicht im Netz $($info.Netz)/$praefix - Clients könnten ihn nicht erreichen.") }
+    }
+    else { $e.Hinweise.Add('Kein Router (Option 003) - Clients kommen dann nicht aus dem eigenen Netz hinaus.') }
+    foreach ($d in @($Plan.DnsServer | Where-Object { $_ })) {
+        if ($null -eq (ConvertTo-IpZahl $d)) { $e.Fehler.Add("DNS-Server: '$d' ist keine gültige IPv4-Adresse.") }
+    }
+    if (-not @($Plan.DnsServer | Where-Object { $_ }).Count) { $e.Hinweise.Add('Kein DNS-Server (Option 006) - Clients finden dann die Domäne nicht.') }
+    if ($Plan.Domaene -and -not (Test-DnsHostname $Plan.Domaene)) { $e.Fehler.Add("Domänenname: $(Get-DnsHostnameFehler $Plan.Domaene)") }
+    if ($null -eq $Plan.LeaseDauer -or $Plan.LeaseDauer -isnot [TimeSpan]) { $e.Fehler.Add('Lease-Dauer fehlt oder ist ungültig.') }
+
+    if ($e.Fehler.Count -eq 0) {
+        foreach ($a in @($Plan.Ausschluesse | Where-Object { $_ })) {
+            $as = ConvertTo-IpZahl $a.Start
+            $ae = ConvertTo-IpZahl $a.Ende
+            if ($null -eq $as -or $null -eq $ae -or $as -gt $ae) { $e.Fehler.Add("Ausschluss $(Format-DhcpAusschluesse @($a)): ungültig."); continue }
+            if ($as -lt $start -or $ae -gt $ende) { $e.Fehler.Add("Ausschluss $(Format-DhcpAusschluesse @($a)) liegt nicht im Verteilbereich $($Plan.Start) bis $($Plan.Ende).") }
+        }
+    }
+    if ($e.Fehler.Count) { return $e }
+
+    # Router und Server-IP dürfen nicht verteilt werden -> als Ausschluss vorschlagen
+    if ($null -ne $router -and $router -ge $start -and $router -le $ende -and -not (Test-IpInBereichen $router $Plan.Ausschluesse)) {
+        $e.Vorschlaege.Add([pscustomobject]@{ Start = $Plan.Router; Ende = $Plan.Router; Grund = 'Router' })
+    }
+    $imNetz = $false
+    foreach ($ip in @($ServerIps | Where-Object { $_ })) {
+        $z = ConvertTo-IpZahl $ip
+        if ($null -eq $z) { continue }
+        if ($z -gt $nA -and $z -lt $bA) { $imNetz = $true }
+        if ($z -ge $start -and $z -le $ende -and -not (Test-IpInBereichen $z $Plan.Ausschluesse) -and
+            -not @($e.Vorschlaege | Where-Object { $_.Start -eq $ip }).Count) {
+            $e.Vorschlaege.Add([pscustomobject]@{ Start = $ip; Ende = $ip; Grund = 'IP dieses Servers' })
+        }
+    }
+    if (@($ServerIps | Where-Object { $_ }).Count -and -not $imNetz) {
+        $e.Hinweise.Add("Dieser Server hat keine Adresse im Netz $($info.Netz)/$praefix - Clients erreichen ihn nur über ein DHCP-Relay (IP-Helper) am Router.")
+    }
+
+    # Überschneidung mit vorhandenen Bereichen
+    foreach ($v in @($Vorhandene | Where-Object { $_ })) {
+        $vNetz = ConvertTo-IpZahl "$($v.ScopeId)"
+        $vPraefix = Get-PraefixAusEingabe "$($v.SubnetMask)"
+        if ($null -eq $vNetz -or $null -eq $vPraefix) { continue }
+        $vBc = $vNetz + ([int64]1 -shl (32 - $vPraefix)) - 1
+        if ($vNetz -eq $nA -and $vPraefix -eq $praefix) { $e.Vorhanden = $v; continue }
+        if ($vNetz -le $bA -and $vBc -ge $nA) {
+            $e.Fehler.Add("Überschneidet sich mit dem vorhandenen Bereich $($v.ScopeId)/$vPraefix ($($v.Name)) - ein Netz darf nur einmal vorkommen.")
+        }
+    }
+    return $e
+}
+
+# Bereiche aus JSON {"Bereiche":[...], "ServerIp": "", "DnsIntegration": true} -> Pläne + Fehler.
+# Fehlende Angaben kommen aus dem Vorschlag (Router = erste Adresse, DNS = Server-IP, Domäne aus AD).
+function ConvertFrom-DhcpKonfigJson([string]$Json, [string]$ServerIp = '', [string]$Domaene = '') {
+    $e = [pscustomobject]@{ Plaene = @(); Fehler = [System.Collections.Generic.List[string]]::new(); ServerIp = $ServerIp; DnsIntegration = $false }
+    try { $objekt = ConvertFrom-Json -InputObject $Json -ErrorAction Stop }
+    catch { $e.Fehler.Add("Datei ist kein gültiges JSON ($($_.Exception.Message))."); return $e }
+    if (-not $objekt -or -not ($objekt.PSObject.Properties.Name -contains 'Bereiche')) { $e.Fehler.Add('Eintrag "Bereiche" fehlt.'); return $e }
+    if ("$($objekt.ServerIp)".Trim()) {
+        if ($null -eq (ConvertTo-IpZahl "$($objekt.ServerIp)".Trim())) { $e.Fehler.Add("ServerIp: '$($objekt.ServerIp)' ist keine gültige IPv4-Adresse.") }
+        else { $e.ServerIp = "$($objekt.ServerIp)".Trim() }
+    }
+    $ServerIp = $e.ServerIp
+    $e.DnsIntegration = [bool]$objekt.DnsIntegration
+    if (-not $Domaene -and "$($objekt.Domaene)") { $Domaene = "$($objekt.Domaene)" }
+
+    $plaene = [System.Collections.Generic.List[object]]::new()
+    $nr = 0
+    foreach ($b in @($objekt.Bereiche)) {
+        $nr++
+        $wo = "Bereich $nr"
+        $netzText = "$($b.Netz)".Trim()
+        $praefix = $null
+        if ($netzText -match '^(.+)/(\d{1,2})$') { $netzText = $Matches[1]; $praefix = [int]$Matches[2] }
+        elseif ("$($b.Maske)".Trim()) { $praefix = Get-PraefixAusEingabe "$($b.Maske)" }
+        else { $praefix = 24 }
+        if ($null -eq (ConvertTo-IpZahl $netzText)) { $e.Fehler.Add("${wo}: Netz '$($b.Netz)' fehlt oder ist ungültig."); continue }
+        if ($null -eq $praefix -or $praefix -lt 8 -or $praefix -gt 30) { $e.Fehler.Add("${wo}: Maske '$($b.Maske)' ist ungültig (/8 bis /30)."); continue }
+        $basisIp = if ($ServerIp -and (Get-SubnetzInfo -Ip (ConvertTo-IpZahl $ServerIp) -Praefix $praefix).Netz -eq (Get-SubnetzInfo -Ip (ConvertTo-IpZahl $netzText) -Praefix $praefix).Netz) { $ServerIp } else { $netzText }
+        $p = Get-DhcpVorschlag $basisIp $praefix $Domaene
+        if ($basisIp -ne $ServerIp) { $p.DnsServer = @(if ($ServerIp) { $ServerIp }) }
+        $p.Netz = $netzText
+        if ("$($b.Name)".Trim())  { $p.Name = "$($b.Name)".Trim() }
+        if ("$($b.Start)".Trim()) { $p.Start = "$($b.Start)".Trim() }
+        if ("$($b.Ende)".Trim())  { $p.Ende = "$($b.Ende)".Trim() }
+        if ($b.PSObject.Properties.Name -contains 'Router') { $p.Router = "$($b.Router)".Trim() }
+        if ($b.PSObject.Properties.Name -contains 'DnsServer') { $p.DnsServer = @($b.DnsServer | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+        if ("$($b.Domaene)".Trim()) { $p.Domaene = "$($b.Domaene)".Trim() }
+        if ($b.PSObject.Properties.Name -contains 'LeaseTage') {
+            $p.LeaseDauer = ConvertTo-LeaseDauer "$($b.LeaseTage)"
+            if (-not $p.LeaseDauer) { $e.Fehler.Add("${wo}: LeaseTage '$($b.LeaseTage)' ist ungültig (1 bis 999)."); continue }
+        }
+        if ($b.Ausschluesse) {
+            $a = ConvertFrom-DhcpAusschlussText (@($b.Ausschluesse) -join ',')
+            if ($a.Fehler) { $e.Fehler.Add("${wo}: Ausschluss $($a.Fehler)"); continue }
+            $p.Ausschluesse = $a.Bereiche
+        }
+        $res = [System.Collections.Generic.List[object]]::new()
+        foreach ($r in @($b.Reservierungen | Where-Object { $_ })) {
+            $mac = ConvertTo-MacAdresse "$($r.Mac)"
+            if (-not $mac) { $e.Fehler.Add("${wo}: Reservierung '$($r.Name)': MAC '$($r.Mac)' ist ungültig (12 Hex-Zeichen, z.B. 00:11:22:AA:BB:CC)."); continue }
+            if ($null -eq (ConvertTo-IpZahl "$($r.Ip)")) { $e.Fehler.Add("${wo}: Reservierung '$($r.Name)': IP '$($r.Ip)' ist ungültig."); continue }
+            $name = if ("$($r.Name)".Trim()) { "$($r.Name)".Trim() } else { "Reservierung-$("$($r.Ip)".Split('.')[3])" }
+            $res.Add([pscustomobject]@{ Ip = "$($r.Ip)".Trim(); Mac = $mac; Name = $name; Beschreibung = "$($r.Beschreibung)" })
+        }
+        $p.Reservierungen = $res.ToArray()
+        $plaene.Add($p)
+    }
+    if ($plaene.Count -eq 0 -and $e.Fehler.Count -eq 0) { $e.Fehler.Add('Keine Bereiche in der Datei.') }
+    $e.Plaene = $plaene.ToArray()
+    return $e
+}
+
+# Reservierung prüfen: IP im Verteilbereich, MAC gültig, nicht doppelt -> '' oder Fehler.
+# 'VORHANDEN' = genau diese Reservierung gibt es schon
+function Test-DhcpReservierung([string]$Ip, [string]$Mac, $Bereich, [object[]]$Vorhandene = @()) {
+    $z = ConvertTo-IpZahl $Ip
+    if ($null -eq $z) { return "'$Ip' ist keine gültige IPv4-Adresse." }
+    if (-not $Mac) { return 'MAC-Adresse ungültig (12 Hex-Zeichen, z.B. 00:11:22:AA:BB:CC).' }
+    if ($z -lt (ConvertTo-IpZahl "$($Bereich.StartRange)") -or $z -gt (ConvertTo-IpZahl "$($Bereich.EndRange)")) {
+        return "$Ip liegt nicht im Verteilbereich $($Bereich.StartRange) bis $($Bereich.EndRange) - Windows lässt Reservierungen nur dort zu."
+    }
+    $gleicheIp  = @($Vorhandene | Where-Object { "$($_.IPAddress)" -eq $Ip }) | Select-Object -First 1
+    $gleicheMac = @($Vorhandene | Where-Object { (ConvertTo-MacAdresse "$($_.ClientId)") -eq $Mac }) | Select-Object -First 1
+    if ($gleicheIp -and (ConvertTo-MacAdresse "$($gleicheIp.ClientId)") -eq $Mac) { return 'VORHANDEN' }
+    if ($gleicheIp)  { return "$Ip ist schon für $($gleicheIp.ClientId) reserviert ($($gleicheIp.Name))." }
+    if ($gleicheMac) { return "$Mac hat schon die Reservierung $($gleicheMac.IPAddress) ($($gleicheMac.Name))." }
+    return ''
+}
+#endregion
+
+#region ======================= DHCP-SERVER ==========================
+
+# Aktive Netzwerkkarte (mit Standardgateway, sonst die erste mit fester IPv4) -> Ip, Praefix, Gateway, Alias
+function Get-AktiveNetzwerkkarte {
+    $adressen = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                  Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' })
+    if ($adressen.Count -eq 0) { return $null }
+    $routen = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)
+    $wahl = @($adressen | Where-Object { $routen.InterfaceIndex -contains $_.InterfaceIndex }) | Select-Object -First 1
+    if (-not $wahl) { $wahl = $adressen[0] }
+    $gateway = @($routen | Where-Object { $_.InterfaceIndex -eq $wahl.InterfaceIndex } | ForEach-Object { "$($_.NextHop)" }) | Select-Object -First 1
+    return [pscustomobject]@{ Ip = "$($wahl.IPAddress)"; Praefix = [int]$wahl.PrefixLength; Gateway = "$gateway"; Alias = "$($wahl.InterfaceAlias)" }
+}
+
+function Get-ServerIpListe {
+    return @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+             Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | ForEach-Object { "$($_.IPAddress)" })
+}
+
+function Get-DhcpFqdn {
+    if ($Domain) { return "$env:COMPUTERNAME.$($Domain.DNSRoot)".ToLower() }
+    return "$env:COMPUTERNAME".ToLower()
+}
+
+# Ist der Hinweis "Konfiguration abschließen" im Server-Manager erledigt? (ConfigurationState = 2)
+function Test-DhcpNachkonfigFertig {
+    $wert = Get-ItemProperty -Path $script:DhcpServerManagerSchluessel -Name ConfigurationState -ErrorAction SilentlyContinue
+    return ($wert -and [int]$wert.ConfigurationState -eq 2)
+}
+
+function Set-DhcpNachkonfigFertig {
+    if (-not (Test-Path -Path $script:DhcpServerManagerSchluessel)) { New-Item -Path $script:DhcpServerManagerSchluessel -Force -ErrorAction Stop | Out-Null }
+    Set-ItemProperty -Path $script:DhcpServerManagerSchluessel -Name ConfigurationState -Value 2 -Type DWord -ErrorAction Stop
+}
+
+# Ist dieser Server im AD als DHCP-Server autorisiert?
+function Test-DhcpAutorisiert([string]$Fqdn, [string]$Ip) {
+    $liste = @(Get-DhcpServerInDC -ErrorAction Stop)
+    return [bool](@($liste | Where-Object { "$($_.DnsName)" -eq $Fqdn -or "$($_.IPAddress)" -eq $Ip }).Count)
+}
+
+# Was ist am Server schon erledigt? Ändert nichts.
+function Get-DhcpServerStand([string]$ServerIp) {
+    $f = $script:Faehig
+    $s = [pscustomobject]@{
+        Rolle       = [bool]$f.DhcpRolle
+        Dienst      = [bool]$f.DhcpDienst
+        Modul       = [bool]$f.DhcpModul
+        AD          = [bool]$f.AD
+        Fqdn        = Get-DhcpFqdn
+        ServerIp    = $ServerIp
+        Autorisiert = $null      # $null = unbekannt (Rolle/AD fehlt)
+        Nachkonfig  = $false
+    }
+    if ($s.Modul -and $s.AD) { try { $s.Autorisiert = Test-DhcpAutorisiert $s.Fqdn $ServerIp } catch { $s.Autorisiert = $null } }
+    $s.Nachkonfig = Test-DhcpNachkonfigFertig
+    return $s
+}
+
+function Show-DhcpServerStand($Stand) {
+    $jn = { param($Wert) if ($null -eq $Wert) { 'unbekannt' } elseif ($Wert) { 'ja' } else { 'nein' } }
+    Write-Info "Rolle installiert:          $(& $jn $Stand.Rolle)"
+    Write-Info "Dienst läuft:               $(& $jn $Stand.Dienst)"
+    Write-Info "Im AD autorisiert:          $(& $jn $Stand.Autorisiert)   ($($Stand.Fqdn), $($Stand.ServerIp))"
+    Write-Info "Server-Manager-Hinweis weg: $(& $jn $Stand.Nachkonfig)"
+}
+
+# Rolle, Sicherheitsgruppen, Autorisierung, Dienst-Neustart, Server-Manager-Hinweis.
+# Idempotent: erledigte Schritte werden als VORHANDEN gemeldet. $true = Server bereit für Bereiche
+function Initialize-DhcpServer([string]$ServerIp, [switch]$Bestaetigt) {
+    $stand = Get-DhcpServerStand $ServerIp
+    if (-not $Bestaetigt) {
+        Write-Info 'Server vorbereiten:'
+        Write-Host ("    Rolle DHCP              {0}" -f $(if ($stand.Rolle) { 'vorhanden' } else { 'wird installiert (Install-WindowsFeature DHCP -IncludeManagementTools)' })) -ForegroundColor White
+        Write-Host  '    Sicherheitsgruppen      DHCP-Administratoren / DHCP-Benutzer (Add-DhcpServerSecurityGroup)' -ForegroundColor White
+        $auth = if (-not $stand.AD) { 'übersprungen (kein AD)' } elseif ($stand.Autorisiert) { 'vorhanden' } else { "wird autorisiert: $($stand.Fqdn) ($ServerIp)" }
+        Write-Host  "    Autorisierung im AD     $auth" -ForegroundColor White
+        Write-Host  '    Dienst DHCPServer       wird neu gestartet' -ForegroundColor White
+        Write-Host ("    Server-Manager-Hinweis  {0}" -f $(if ($stand.Nachkonfig) { 'schon erledigt' } else { 'wird entfernt (ConfigurationState = 2)' })) -ForegroundColor White
+        if ($Funktionen.Vorschau -and -not (Read-JaNein 'Server jetzt so vorbereiten?' $true)) { Stop-Aktion }
+    }
+
+    # 1) Rolle
+    if (-not $stand.Rolle) {
+        if (-not (Install-WindowsRolle -Feature 'DHCP' -Typ 'DHCP-Rolle' -Text 'DHCP-Server mit Verwaltungstools')) { return $false }
+        $script:Faehig = Get-Faehigkeiten
+        if (-not $script:Faehig.DhcpRolle) { Write-Warnung "DHCP-Rolle noch nicht nutzbar: $($script:Faehig.Grund.DHCP)"; return $false }
+    }
+    else { Add-Ergebnis 'DHCP-Rolle' 'DHCP' $env:COMPUTERNAME 'VORHANDEN' }
+    if (-not $script:Faehig.DhcpModul) { Write-Warnung 'Modul DhcpServer fehlt - bitte Feature RSAT-DHCP installieren.'; return $false }
+
+    # 2) Sicherheitsgruppen (legt nur Fehlendes an)
+    try {
+        Add-DhcpServerSecurityGroup -ErrorAction Stop
+        Add-Ergebnis 'DHCP-Gruppen' 'DHCP-Administratoren, DHCP-Benutzer' $env:COMPUTERNAME 'OK' 'angelegt bzw. schon vorhanden'
+    }
+    catch { Add-Ergebnis 'DHCP-Gruppen' 'DHCP-Administratoren, DHCP-Benutzer' $env:COMPUTERNAME 'FEHLER' $_.Exception.Message }
+
+    # 3) Autorisierung im AD
+    if (-not $script:Faehig.AD) {
+        Add-Ergebnis 'DHCP-Autorisierung' $stand.Fqdn $ServerIp 'UEBERSPRUNGEN' 'kein Active Directory - Server verteilt nur ohne AD-Prüfung'
+    }
+    else {
+        try {
+            if (Test-DhcpAutorisiert $stand.Fqdn $ServerIp) { Add-Ergebnis 'DHCP-Autorisierung' $stand.Fqdn $ServerIp 'VORHANDEN' }
+            else {
+                Add-DhcpServerInDC -DnsName $stand.Fqdn -IPAddress $ServerIp -ErrorAction Stop
+                Add-Ergebnis 'DHCP-Autorisierung' $stand.Fqdn $ServerIp 'OK'
+            }
+        }
+        catch { Add-Ergebnis 'DHCP-Autorisierung' $stand.Fqdn $ServerIp 'FEHLER' $_.Exception.Message }
+    }
+
+    # 4) Dienst automatisch starten und neu starten, damit Gruppen und Autorisierung greifen
+    try {
+        Set-Service -Name DHCPServer -StartupType Automatic -ErrorAction Stop
+        Restart-Service -Name DHCPServer -Force -ErrorAction Stop
+        Add-Ergebnis 'DHCP-Dienst' 'DHCPServer' $env:COMPUTERNAME 'OK' 'neu gestartet'
+    }
+    catch { Add-Ergebnis 'DHCP-Dienst' 'DHCPServer' $env:COMPUTERNAME 'FEHLER' $_.Exception.Message }
+
+    # 5) Server-Manager: "Konfiguration abschließen" entfernen
+    if (Test-DhcpNachkonfigFertig) { Add-Ergebnis 'DHCP-Nachkonfig' 'ConfigurationState = 2' $script:DhcpServerManagerSchluessel 'VORHANDEN' }
+    else {
+        try { Set-DhcpNachkonfigFertig; Add-Ergebnis 'DHCP-Nachkonfig' 'ConfigurationState = 2' $script:DhcpServerManagerSchluessel 'OK' 'Hinweis im Server-Manager entfernt' }
+        catch { Add-Ergebnis 'DHCP-Nachkonfig' 'ConfigurationState = 2' $script:DhcpServerManagerSchluessel 'FEHLER' $_.Exception.Message }
+    }
+    $script:Faehig = Get-Faehigkeiten
+    return [bool]$script:Faehig.DHCP
+}
+
+function Get-DhcpBereiche {
+    return @(Get-DhcpServerv4Scope -ErrorAction Stop | Sort-Object { ConvertTo-IpZahl "$($_.ScopeId)" })
+}
+
+function Select-DhcpBereich([string]$Titel) {
+    $bereiche = @(Get-DhcpBereiche)
+    if ($bereiche.Count -eq 0) { Write-Warnung 'Noch kein Bereich vorhanden - zuerst mit [2] oder [3] anlegen.'; Stop-Aktion }
+    $eintraege = @($bereiche | ForEach-Object {
+        [pscustomobject]@{ Anzeige = '{0,-16} {1,-24} {2} - {3}   {4}' -f "$($_.ScopeId)", $_.Name, $_.StartRange, $_.EndRange, $_.State; Bereich = $_ }
+    })
+    $wahl = @(Select-AusListe -Eintraege $eintraege -Titel $Titel)
+    if ($wahl.Count -eq 0) { Stop-Aktion }
+    Write-Ok "Bereich: $($wahl[0].Bereich.ScopeId) ($($wahl[0].Bereich.Name))"
+    return $wahl[0].Bereich
+}
+
+# Eine IPv4-Adresse abfragen (Pflicht, gültig)
+function Read-DhcpIp([string]$Frage, [string]$Standard) {
+    while ($true) {
+        $t = Read-Text $Frage $Standard -Pflicht
+        if ($null -ne (ConvertTo-IpZahl $t)) { return $t }
+        Write-Warnung "'$t' ist keine gültige IPv4-Adresse (z.B. 192.168.10.1)."
+    }
+}
+
+# Assistent für einen Bereich. $Vorschlag = Startwerte (Enter = übernehmen). Gibt den geprüften Plan zurück
+function Read-DhcpBereichPlan($Vorschlag, [object[]]$Vorhandene = @(), [string[]]$ServerIps = @()) {
+    $p = $Vorschlag.PSObject.Copy()
+    while ($true) {
+        Write-Info 'Enter übernimmt den Vorschlag in [Klammern].'
+        $p.Name = Read-Text 'Name des Bereichs' $p.Name -Pflicht
+        while ($true) {
+            $p.Netz = Read-DhcpIp 'Netz (Netzadresse)' $p.Netz
+            $maske = Read-Text 'Subnetzmaske (255.255.255.0 oder /24)' $p.Maske -Pflicht
+            $praefix = Get-PraefixAusEingabe $maske
+            if ($null -eq $praefix -or $praefix -lt 8 -or $praefix -gt 30) { Write-Warnung "Ungültige Maske '$maske' - für DHCP /8 bis /30, z.B. 255.255.255.0."; continue }
+            $info = Get-SubnetzInfo -Ip (ConvertTo-IpZahl $p.Netz) -Praefix $praefix
+            $p.Praefix = $praefix
+            $p.Maske = $info.Maske
+            if ($info.Netz -ne $p.Netz) {
+                Write-Warnung "$($p.Netz) ist keine Netzadresse für /$praefix - die Netzadresse ist $($info.Netz)."
+                $p.Netz = $info.Netz
+                continue
+            }
+            break
+        }
+        Write-Info "Netz $($p.Netz)/$($p.Praefix): Adressen $($info.ErsterHost) bis $($info.LetzterHost)"
+        $p.Start = Read-DhcpIp 'Erste verteilte Adresse' $p.Start
+        $p.Ende  = Read-DhcpIp 'Letzte verteilte Adresse' $p.Ende
+        while ($true) {
+            $a = ConvertFrom-DhcpAusschlussText (Read-Text "Ausschlüsse im Verteilbereich (z.B. 192.168.10.150-192.168.10.155, mehrere mit Komma, '-' = keine)" (Format-DhcpAusschluesse $p.Ausschluesse))
+            if (-not $a.Fehler) { $p.Ausschluesse = $a.Bereiche; break }
+            Write-Warnung $a.Fehler
+        }
+        while ($true) {
+            $text = Read-Text 'Lease-Dauer (Tage, z.B. 8 - oder 12h, 30m, 1.12:00:00)' $(if ($p.LeaseDauer.TotalHours % 24) { "$($p.LeaseDauer)" } else { "$([int]$p.LeaseDauer.TotalDays)" }) -Pflicht
+            $dauer = ConvertTo-LeaseDauer $text
+            if ($dauer) { $p.LeaseDauer = $dauer; break }
+            Write-Warnung "Ungültige Lease-Dauer '$text' - zwischen 1 Minute und 999 Tagen, z.B. 8 (Tage) oder 12h."
+        }
+        $p.Router = Read-DhcpIp 'Router / Standardgateway (Option 003)' $p.Router
+        while ($true) {
+            $liste = ConvertFrom-IpListe (Read-Text 'DNS-Server (Option 006), mehrere mit Komma' ($p.DnsServer -join ', ') -Pflicht)
+            $v6 = @($liste.Gueltig | Where-Object { (Get-IpArt $_) -ne 'IPv4' })
+            if ($liste.Ungueltig.Count -or $v6.Count) { Write-Warnung "Keine gültige IPv4-Adresse: $((@($liste.Ungueltig) + $v6) -join ', ')"; continue }
+            $p.DnsServer = @($liste.Gueltig)
+            break
+        }
+        while ($true) {
+            $d = Read-Text 'DNS-Domänenname (Option 015)' $p.Domaene
+            if (-not $d -or (Test-DnsHostname $d)) { $p.Domaene = $d.TrimEnd('.'); break }
+            Write-Warnung "Ungültiger Domänenname: $(Get-DnsHostnameFehler $d)"
+        }
+
+        $test = Test-DhcpBereichPlan $p $Vorhandene $ServerIps
+        foreach ($v in $test.Vorschlaege) {
+            Write-Warnung "$($v.Start) ($($v.Grund)) liegt im Verteilbereich und würde sonst an einen Client vergeben."
+            if (Read-JaNein "$($v.Start) als Ausschluss eintragen?" $true) { $p.Ausschluesse = @($p.Ausschluesse) + $v }
+        }
+        foreach ($h in $test.Hinweise) { Write-Info "Hinweis: $h" }
+        if ($test.Fehler.Count) {
+            foreach ($f in $test.Fehler) { Write-Warnung $f }
+            if (Read-JaNein 'Angaben korrigieren?' $true) { continue }
+            Stop-Aktion
+        }
+        $p.Vorhanden = $test.Vorhanden
+        if ($test.Vorhanden) {
+            Write-Warnung "Den Bereich $($p.Netz) gibt es schon ($($test.Vorhanden.Name), $($test.Vorhanden.StartRange) - $($test.Vorhanden.EndRange))."
+            if (-not (Read-JaNein 'Vorhandenen Bereich ergänzen (Ausschlüsse, Optionen, aktivieren)? Nein = Angaben ändern' $true)) { continue }
+        }
+        return $p
+    }
+}
+
+function Show-DhcpPlan($Plan) {
+    $zusatz = if ($Plan.Vorhanden) { '   (vorhanden - wird ergänzt, Verteilbereich bleibt)' } else { '' }
+    Write-Host ("    Bereich      {0}/{1}  '{2}'{3}" -f $Plan.Netz, $Plan.Praefix, $Plan.Name, $zusatz) -ForegroundColor White
+    Write-Host ("    Verteilt     {0} bis {1}" -f $Plan.Start, $Plan.Ende) -ForegroundColor White
+    Write-Host ("    Ausschlüsse  {0}" -f (Format-DhcpAusschluesse $Plan.Ausschluesse)) -ForegroundColor White
+    Write-Host ("    Lease        {0}" -f (Format-LeaseDauer $Plan.LeaseDauer)) -ForegroundColor White
+    Write-Host ("    003 Router   {0}" -f $(if ($Plan.Router) { $Plan.Router } else { '-' })) -ForegroundColor White
+    Write-Host ("    006 DNS      {0}" -f $(if (@($Plan.DnsServer).Count) { $Plan.DnsServer -join ', ' } else { '-' })) -ForegroundColor White
+    Write-Host ("    015 Domäne   {0}" -f $(if ($Plan.Domaene) { $Plan.Domaene } else { '-' })) -ForegroundColor White
+    foreach ($r in @($Plan.Reservierungen | Where-Object { $_ })) {
+        Write-Host ("    Reserviert   {0,-15} {1}  {2}" -f $r.Ip, $r.Mac, $r.Name) -ForegroundColor White
+    }
+}
+
+# Optionen 003/006/015 setzen, nur wenn sie anders sind
+function Set-DhcpBereichOptionen([string]$ScopeId, $Plan) {
+    $optionen = @(
+        @{ Id = 3;  Text = '003 Router'; Wert = @($Plan.Router | Where-Object { $_ }) }
+        @{ Id = 6;  Text = '006 DNS';    Wert = @($Plan.DnsServer | Where-Object { $_ }) }
+        @{ Id = 15; Text = '015 Domäne'; Wert = @($Plan.Domaene | Where-Object { $_ }) }
+    )
+    foreach ($o in $optionen) {
+        if ($o.Wert.Count -eq 0) { continue }
+        $neu = $o.Wert -join ', '
+        $alt = ''
+        try { $alt = (@((Get-DhcpServerv4OptionValue -ScopeId $ScopeId -OptionId $o.Id -ErrorAction Stop).Value) -join ', ') } catch { $alt = '' }
+        if ($alt -eq $neu) { Add-Ergebnis 'DHCP-Option' "$($o.Text) = $neu" $ScopeId 'VORHANDEN'; continue }
+        try {
+            switch ($o.Id) {
+                3  { Set-DhcpServerv4OptionValue -ScopeId $ScopeId -Router $o.Wert -ErrorAction Stop }
+                # -Force: DNS-Server nicht online prüfen (der eigene DNS ist evtl. gerade erst installiert)
+                6  { Set-DhcpServerv4OptionValue -ScopeId $ScopeId -DnsServer $o.Wert -Force -ErrorAction Stop }
+                15 { Set-DhcpServerv4OptionValue -ScopeId $ScopeId -DnsDomain $o.Wert[0] -ErrorAction Stop }
+            }
+            $info = if ($alt) { "vorher $alt" } else { '' }
+            Add-Ergebnis 'DHCP-Option' "$($o.Text) = $neu" $ScopeId 'OK' $info
+        }
+        catch { Add-Ergebnis 'DHCP-Option' "$($o.Text) = $neu" $ScopeId 'FEHLER' $_.Exception.Message }
+    }
+}
+
+# Reservierung anlegen (idempotent). $Bereich = Objekt von Get-DhcpServerv4Scope
+function Add-DhcpReservierung($Bereich, [string]$Ip, [string]$Mac, [string]$Name, [string]$Beschreibung = '') {
+    $scopeId = "$($Bereich.ScopeId)"
+    $text = "$Ip = $Mac ($Name)"
+    $vorhandene = @(Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue)
+    $pruefung = Test-DhcpReservierung $Ip $Mac $Bereich $vorhandene
+    if ($pruefung -eq 'VORHANDEN') { Add-Ergebnis 'DHCP-Reservierung' $text $scopeId 'VORHANDEN'; return }
+    if ($pruefung) { Add-Ergebnis 'DHCP-Reservierung' $text $scopeId 'FEHLER' $pruefung; return }
+    $param = @{ ScopeId = $scopeId; IPAddress = $Ip; ClientId = $Mac; Name = $Name; ErrorAction = 'Stop' }
+    if ($Beschreibung) { $param.Description = $Beschreibung }
+    try {
+        Add-DhcpServerv4Reservation @param
+        Add-Ergebnis 'DHCP-Reservierung' $text $scopeId 'OK' -Bezug "$Ip|$Mac"
+    }
+    catch { Add-Ergebnis 'DHCP-Reservierung' $text $scopeId 'FEHLER' $_.Exception.Message }
+}
+
+# Bereich nach Plan anlegen bzw. ergänzen: Bereich, Ausschlüsse, Optionen, Reservierungen. $true = Bereich ist da
+function New-DhcpBereichAusPlan($Plan) {
+    $scopeId = $Plan.Netz
+    $text = "$($Plan.Netz)/$($Plan.Praefix) $($Plan.Name)"
+    $bereich = Get-DhcpServerv4Scope -ScopeId $scopeId -ErrorAction SilentlyContinue
+    if ($bereich) {
+        Add-Ergebnis 'DHCP-Bereich' $text $scopeId 'VORHANDEN' "$($bereich.StartRange) - $($bereich.EndRange)"
+        if ("$($bereich.State)" -ne 'Active') {
+            try { Set-DhcpServerv4Scope -ScopeId $scopeId -State Active -ErrorAction Stop; Add-Ergebnis 'DHCP-Bereich' $text $scopeId 'OK' 'aktiviert' }
+            catch { Add-Ergebnis 'DHCP-Bereich' $text $scopeId 'FEHLER' "nicht aktiviert: $($_.Exception.Message)" }
+        }
+    }
+    else {
+        $param = @{
+            Name          = $Plan.Name
+            StartRange    = $Plan.Start
+            EndRange      = $Plan.Ende
+            SubnetMask    = ConvertTo-IpText (Get-MaskeAusPraefix $Plan.Praefix)
+            LeaseDuration = $Plan.LeaseDauer
+            State         = 'Active'
+            ErrorAction   = 'Stop'
+        }
+        try {
+            Add-DhcpServerv4Scope @param
+            Add-Ergebnis 'DHCP-Bereich' $text $scopeId 'OK' "$($Plan.Start) - $($Plan.Ende), Lease $(Format-LeaseDauer $Plan.LeaseDauer)" -Bezug $scopeId
+            $bereich = Get-DhcpServerv4Scope -ScopeId $scopeId -ErrorAction SilentlyContinue
+        }
+        catch { Add-Ergebnis 'DHCP-Bereich' $text $scopeId 'FEHLER' $_.Exception.Message; return $false }
+    }
+
+    $vorhanden = @(Get-DhcpServerv4ExclusionRange -ScopeId $scopeId -ErrorAction SilentlyContinue)
+    foreach ($a in @($Plan.Ausschluesse | Where-Object { $_ })) {
+        $name = Format-DhcpAusschluesse @($a)
+        if (@($vorhanden | Where-Object { "$($_.StartRange)" -eq $a.Start -and "$($_.EndRange)" -eq $a.Ende }).Count) { Add-Ergebnis 'DHCP-Ausschluss' $name $scopeId 'VORHANDEN'; continue }
+        try {
+            Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $a.Start -EndRange $a.Ende -ErrorAction Stop
+            Add-Ergebnis 'DHCP-Ausschluss' $name $scopeId 'OK'
+        }
+        catch { Add-Ergebnis 'DHCP-Ausschluss' $name $scopeId 'FEHLER' $_.Exception.Message }
+    }
+    Set-DhcpBereichOptionen $scopeId $Plan
+    if (-not $bereich) { $bereich = [pscustomobject]@{ ScopeId = $scopeId; StartRange = $Plan.Start; EndRange = $Plan.Ende } }
+    foreach ($r in @($Plan.Reservierungen | Where-Object { $_ })) { Add-DhcpReservierung $bereich $r.Ip $r.Mac $r.Name $r.Beschreibung }
+    return $true
+}
+
+# Server-IP für Autorisierung und Vorschläge: aktive Netzwerkkarte, änderbar
+function Read-DhcpServerIp {
+    $karte = Get-AktiveNetzwerkkarte
+    $vorschlag = if ($karte) { $karte.Ip } else { '' }
+    if ($karte) { Write-Info "Aktive Netzwerkkarte: $($karte.Alias)  $($karte.Ip)/$($karte.Praefix)$(if ($karte.Gateway) { "  Gateway $($karte.Gateway)" })" }
+    $ip = Read-DhcpIp 'IP-Adresse dieses Servers (für Autorisierung und Vorschläge)' $vorschlag
+    $praefix = if ($karte -and $karte.Ip -eq $ip) { $karte.Praefix } else { 24 }
+    return [pscustomobject]@{ Ip = $ip; Praefix = $praefix }
+}
+#endregion
+
+#region ======================= MODUL [H] DHCP =======================
+
+function Get-DhcpMenue {
+    return @(
+        [pscustomobject]@{ Taste = '1'; Text = 'Status: Rolle, Dienst, Autorisierung, Bereiche';               Braucht = @();                Aktion = { Show-DhcpStatus } }
+        [pscustomobject]@{ Taste = '2'; Text = 'Einrichtungs-Assistent (Rolle, Autorisierung, erster Bereich)'; Braucht = @();                Aktion = { Start-DhcpAssistent } }
+        [pscustomobject]@{ Taste = '3'; Text = 'Bereich hinzufügen (Assistent mit Prüfungen)';                  Braucht = @('DHCP');          Aktion = { Start-DhcpBereich } }
+        [pscustomobject]@{ Taste = '4'; Text = 'Reservierung hinzufügen (MAC in beliebiger Schreibweise)';       Braucht = @('DHCP');          Aktion = { Start-DhcpReservierung } }
+        [pscustomobject]@{ Taste = '5'; Text = 'Bereiche, Leases und Reservierungen anzeigen';                  Braucht = @('DHCP');          Aktion = { Show-DhcpUebersicht } }
+        [pscustomobject]@{ Taste = '6'; Text = 'Bereich entfernen';                                             Braucht = @('DHCP');          Aktion = { Start-DhcpBereichEntfernen } }
+        [pscustomobject]@{ Taste = '7'; Text = 'Ganze Konfiguration aus Datei laden (ohne Fragen)';             Braucht = @();                Aktion = { Start-DhcpAusDatei } }
+        [pscustomobject]@{ Taste = '8'; Text = 'DNS-Integration für DHCP einrichten (Updates, Reverse-Zone, Dienstkonto)'; Braucht = @('DHCP', 'AD'); Aktion = { Start-DhcpDnsIntegration } }
+        [pscustomobject]@{ Taste = '9'; Text = 'DNS-Integration prüfen (Einstellungen, A/PTR der Leases)';       Braucht = @('DHCP');          Aktion = { Show-DhcpDnsPruefung } }
+    )
+}
+
+function Start-DhcpMenue {
+    while ($true) {
+        $sichtbar = @()
+        $gruende  = @()
+        foreach ($m in @(Get-DhcpMenue)) {
+            $grund = Get-FehlendeFaehigkeit $m.Braucht $script:Faehig
+            if (-not $grund) { $sichtbar += $m }
+            elseif ($gruende -notcontains $grund) { $gruende += $grund }
+        }
+        Write-Titel "DHCP   Server: $env:COMPUTERNAME"
+        foreach ($m in $sichtbar) { Write-Host ('  [{0}] {1}' -f $m.Taste, $m.Text) }
+        Write-Host '  [0] Zurück zum Hauptmenü'
+        if ($gruende.Count) { Write-Host "  Weitere Punkte ausgeblendet: $($gruende -join ' / ')  ->  [2] Einrichtungs-Assistent" -ForegroundColor DarkGray }
+        $wahl = "$(Read-Host '  Auswahl')".Trim().ToUpper()
+        if (-not $wahl -or $wahl -eq '0') { return }
+        $punkt = @($sichtbar | Where-Object { $_.Taste -eq $wahl }) | Select-Object -First 1
+        if (-not $punkt) { Write-Warnung 'Ungültige Auswahl.'; continue }
+        try { & $punkt.Aktion }
+        catch [System.OperationCanceledException] { Write-Warnung 'Abgebrochen - zurück zum DHCP-Menü.' }
+        catch { Write-Host "  FEHLER: $($_.Exception.Message)" -ForegroundColor Red }
+    }
+}
+
+# [H][1]
+function Show-DhcpStatus {
+    Write-Titel 'DHCP - Status'
+    $karte = Get-AktiveNetzwerkkarte
+    $ip = if ($karte) { $karte.Ip } else { '' }
+    Show-DhcpServerStand (Get-DhcpServerStand $ip)
+    if (-not $script:Faehig.DHCP) { Write-Warnung "$($script:Faehig.Grund.DHCP) - Einrichtung mit [2]."; return }
+    $bereiche = @(Get-DhcpBereiche)
+    if ($bereiche.Count -eq 0) { Write-Info 'Noch keine Bereiche - mit [3] anlegen.'; return }
+    $bereiche | ForEach-Object {
+        [pscustomobject]@{ Bereich = "$($_.ScopeId)"; Name = $_.Name; Verteilt = "$($_.StartRange) - $($_.EndRange)"; Status = "$($_.State)"; Lease = Format-LeaseDauer $_.LeaseDuration }
+    } | Format-Table -AutoSize | Out-Host
+}
+
+# [H][2]
+function Start-DhcpAssistent {
+    Write-Titel 'DHCP einrichten (Assistent)'
+    if (-not $script:Faehig.AD) { Write-Warnung "Kein Active Directory ($($script:Faehig.Grund.AD)) - die Autorisierung wird übersprungen." }
+    $server = Read-DhcpServerIp
+    if (-not (Initialize-DhcpServer $server.Ip)) { Write-Warnung 'Server ist noch nicht bereit - Meldungen oben beachten.'; return }
+    Write-Ok 'DHCP-Server ist vorbereitet.'
+    if (Read-JaNein 'Jetzt einen Bereich anlegen?' $true) { Start-DhcpBereich -ServerIp $server.Ip -Praefix $server.Praefix }
+    if ($script:Faehig.AD -and @(Get-DhcpBereiche).Count -and
+        (Read-JaNein 'DNS-Integration jetzt einrichten (Clients automatisch mit A- und PTR-Eintrag ins DNS, empfohlen)?' $true)) {
+        Start-DhcpDnsIntegration
+    }
+}
+
+# [H][3]
+function Start-DhcpBereich([string]$ServerIp = '', [int]$Praefix = 0) {
+    Write-Titel 'DHCP-Bereich anlegen'
+    if (-not $ServerIp) {
+        $karte = Get-AktiveNetzwerkkarte
+        if ($karte) { $ServerIp = $karte.Ip; $Praefix = $karte.Praefix } else { $ServerIp = '192.168.1.10'; $Praefix = 24 }
+    }
+    $domaene = if ($Domain) { $Domain.DNSRoot } else { '' }
+    $vorhandene = @(Get-DhcpBereiche)
+    $serverIps = @(Get-ServerIpListe)
+    while ($true) {
+        $plan = Read-DhcpBereichPlan (Get-DhcpVorschlag $ServerIp $Praefix $domaene) $vorhandene $serverIps
+        Write-Titel 'Vorschau'
+        Show-DhcpPlan $plan
+        if ($Funktionen.Vorschau -and -not (Read-JaNein 'Bereich jetzt so anlegen?' $true)) { Stop-Aktion }
+        if (New-DhcpBereichAusPlan $plan) { Write-Ok "Bereich $($plan.Netz) ist aktiv - Clients bekommen IP, Gateway, DNS und Domäne." }
+        if (-not (Read-JaNein 'Noch einen Bereich anlegen?' $false)) { return }
+        $vorhandene = @(Get-DhcpBereiche)
+    }
+}
+
+# [H][4]
+function Start-DhcpReservierung {
+    Write-Titel 'Reservierung hinzufügen'
+    $bereich = Select-DhcpBereich 'Bereich für die Reservierung wählen'
+    $scopeId = "$($bereich.ScopeId)"
+    while ($true) {
+        $vorhandene = @(Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue)
+        $leases = @(Get-DhcpServerv4Lease -ScopeId $scopeId -ErrorAction SilentlyContinue)
+        $ipVorschlag = ''; $nameVorschlag = ''
+        while ($true) {
+            $hinweis = if ($leases.Count) { "; 'L' = aus $($leases.Count) aktuellen Lease(s) wählen" } else { '' }
+            $eingabe = Read-Text "MAC-Adresse (beliebige Schreibweise, z.B. 00:11:22:AA:BB:CC$hinweis)" -Pflicht
+            if ($eingabe -eq 'L' -and $leases.Count) {
+                $eintraege = @($leases | ForEach-Object { [pscustomobject]@{ Anzeige = '{0,-15} {1,-17} {2}' -f "$($_.IPAddress)", $_.ClientId, $_.HostName; Lease = $_ } })
+                $wahl = @(Select-AusListe -Eintraege $eintraege -Titel 'Lease wählen' -Optional)
+                if ($wahl.Count -eq 0) { continue }
+                $eingabe = "$($wahl[0].Lease.ClientId)"
+                $ipVorschlag = "$($wahl[0].Lease.IPAddress)"
+                $nameVorschlag = "$($wahl[0].Lease.HostName)".Split('.')[0]
+            }
+            $mac = ConvertTo-MacAdresse $eingabe
+            if ($mac) { Write-Ok "MAC: $mac"; break }
+            Write-Warnung "'$eingabe' ist keine MAC-Adresse - 12 Hex-Zeichen (0-9, A-F), Trenner : - . oder keiner."
+        }
+        while ($true) {
+            $ip = Read-DhcpIp "IP-Adresse ($($bereich.StartRange) bis $($bereich.EndRange))" $ipVorschlag
+            $pruefung = Test-DhcpReservierung $ip $mac $bereich $vorhandene
+            if ($pruefung -and $pruefung -ne 'VORHANDEN') { Write-Warnung $pruefung; $ipVorschlag = ''; continue }
+            $fremd = @($leases | Where-Object { "$($_.IPAddress)" -eq $ip -and (ConvertTo-MacAdresse "$($_.ClientId)") -ne $mac })
+            if ($fremd.Count -and -not (Read-JaNein "$ip ist gerade an $($fremd[0].ClientId) ($($fremd[0].HostName)) vergeben. Trotzdem reservieren?" $false)) { continue }
+            break
+        }
+        if (-not $nameVorschlag) { $nameVorschlag = "Geraet-$($ip.Split('.')[3])" }
+        $name = Read-Text 'Name (z.B. Hostname)' $nameVorschlag -Pflicht
+        $beschreibung = Read-Text 'Beschreibung (optional)'
+        if ($Funktionen.Vorschau -and -not (Read-JaNein "Reservierung $ip = $mac ($name) anlegen?" $true)) { Stop-Aktion }
+        Add-DhcpReservierung $bereich $ip $mac $name $beschreibung
+        if (-not (Read-JaNein 'Weitere Reservierung in diesem Bereich?' $false)) { return }
+    }
+}
+
+# [H][5]
+function Show-DhcpUebersicht {
+    Write-Titel 'DHCP - Bereiche, Leases, Reservierungen'
+    $bereiche = @(Get-DhcpBereiche)
+    if ($bereiche.Count -eq 0) { Write-Info 'Keine Bereiche vorhanden.'; return }
+    $optWert = { param($Id, $OptId) try { (@((Get-DhcpServerv4OptionValue -ScopeId $Id -OptionId $OptId -ErrorAction Stop).Value) -join ', ') } catch { '-' } }
+    $bereiche | ForEach-Object {
+        $id = "$($_.ScopeId)"
+        [pscustomobject]@{
+            Bereich  = "$id/$(Get-PraefixAusEingabe "$($_.SubnetMask)")"
+            Name     = $_.Name
+            Verteilt = "$($_.StartRange) - $($_.EndRange)"
+            Status   = "$($_.State)"
+            Lease    = Format-LeaseDauer $_.LeaseDuration
+            Router   = & $optWert $id 3
+            DNS      = & $optWert $id 6
+            Domaene  = & $optWert $id 15
+        }
+    } | Format-Table -AutoSize -Wrap | Out-Host
+    foreach ($b in $bereiche) {
+        $id = "$($b.ScopeId)"
+        Write-Host "  Bereich $id ($($b.Name))" -ForegroundColor Cyan
+        $aus = @(Get-DhcpServerv4ExclusionRange -ScopeId $id -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Start = "$($_.StartRange)"; Ende = "$($_.EndRange)" } })
+        Write-Info "Ausschlüsse: $(Format-DhcpAusschluesse $aus)"
+        $res = @(Get-DhcpServerv4Reservation -ScopeId $id -ErrorAction SilentlyContinue)
+        if ($res.Count) {
+            Write-Info "Reservierungen ($($res.Count)):"
+            $res | Sort-Object { ConvertTo-IpZahl "$($_.IPAddress)" } | ForEach-Object {
+                [pscustomobject]@{ IP = "$($_.IPAddress)"; MAC = $_.ClientId; Name = $_.Name; Beschreibung = $_.Description }
+            } | Format-Table -AutoSize | Out-Host
+        }
+        else { Write-Info 'Reservierungen: keine' }
+        $leases = @(Get-DhcpServerv4Lease -ScopeId $id -ErrorAction SilentlyContinue)
+        if ($leases.Count) {
+            Write-Info "Leases ($($leases.Count)):"
+            $leases | Sort-Object { ConvertTo-IpZahl "$($_.IPAddress)" } | ForEach-Object {
+                [pscustomobject]@{ IP = "$($_.IPAddress)"; MAC = $_.ClientId; Hostname = $_.HostName; Status = "$($_.AddressState)"; 'Läuft ab' = $(if ($_.LeaseExpiryTime) { '{0:dd.MM.yyyy HH:mm}' -f $_.LeaseExpiryTime } else { '-' }) }
+            } | Format-Table -AutoSize | Out-Host
+        }
+        else { Write-Info 'Leases: keine' }
+    }
+}
+
+# [H][6]
+function Start-DhcpBereichEntfernen {
+    Write-Titel 'DHCP-Bereich entfernen'
+    $bereich = Select-DhcpBereich 'Welchen Bereich entfernen?'
+    $id = "$($bereich.ScopeId)"
+    $leases = @(Get-DhcpServerv4Lease -ScopeId $id -ErrorAction SilentlyContinue).Count
+    $res    = @(Get-DhcpServerv4Reservation -ScopeId $id -ErrorAction SilentlyContinue).Count
+    Write-Info "Bereich $id ($($bereich.Name)), $($bereich.StartRange) - $($bereich.EndRange): $leases Lease(s), $res Reservierung(en)"
+    Write-Warnung 'Der Bereich wird mit allen Leases, Reservierungen und Optionen GELÖSCHT. Clients bekommen danach hier keine Adresse mehr.'
+    if ("$(Read-Host "  Zum Bestätigen 'JA' eingeben")".Trim() -cne 'JA') { Stop-Aktion }
+    try {
+        Remove-DhcpServerv4Scope -ScopeId $id -Force -ErrorAction Stop
+        Add-Ergebnis 'DHCP-Bereich' "$id $($bereich.Name)" $id 'ENTFERNT' "$leases Lease(s), $res Reservierung(en)"
+    }
+    catch { Add-Ergebnis 'DHCP-Bereich' "$id $($bereich.Name)" $id 'FEHLER' $_.Exception.Message }
+}
+
+# [H][7]
+function Start-DhcpAusDatei {
+    Write-Titel 'DHCP aus Konfigurationsdatei einrichten'
+    $ordner = if ($script:ScriptOrdner) { $script:ScriptOrdner } else { (Get-Location).ProviderPath }
+    Write-Info 'Beispiel: config/DHCP.example.json (im Repo) - als DHCP-Konfiguration.json neben das Script legen.'
+    while ($true) {
+        $pfad = (Read-Text 'Konfigurationsdatei (Enter = Vorschlag)' (Join-Path $ordner 'DHCP-Konfiguration.json') -Pflicht).Trim('"')
+        if (Test-Path -LiteralPath $pfad -PathType Leaf) { break }
+        Write-Warnung "Datei '$pfad' nicht gefunden."
+        if (-not (Read-JaNein 'Anderen Pfad eingeben?' $true)) { Stop-Aktion }
+    }
+    $karte = Get-AktiveNetzwerkkarte
+    $domaene = if ($Domain) { $Domain.DNSRoot } else { '' }
+    $konfig = ConvertFrom-DhcpKonfigJson ([System.IO.File]::ReadAllText($pfad)) $(if ($karte) { $karte.Ip } else { '' }) $domaene
+    if (-not $konfig.ServerIp) { $konfig.ServerIp = (Read-DhcpServerIp).Ip }
+    $vorhandene = @()
+    if ($script:Faehig.DHCP) { $vorhandene = @(Get-DhcpBereiche) }
+    $serverIps = @(Get-ServerIpListe)
+    if ($serverIps -notcontains $konfig.ServerIp) { $serverIps += $konfig.ServerIp }
+    foreach ($p in $konfig.Plaene) {
+        $test = Test-DhcpBereichPlan $p $vorhandene $serverIps
+        foreach ($f in $test.Fehler) { $konfig.Fehler.Add("$($p.Netz): $f") }
+        foreach ($v in $test.Vorschlaege) {
+            Write-Info "$($p.Netz): $($v.Start) ($($v.Grund)) liegt im Verteilbereich - wird automatisch ausgeschlossen."
+            $p.Ausschluesse = @($p.Ausschluesse) + $v
+        }
+        foreach ($h in $test.Hinweise) { Write-Info "$($p.Netz): $h" }
+        $p.Vorhanden = $test.Vorhanden
+        foreach ($r in @($p.Reservierungen)) {
+            $z = ConvertTo-IpZahl $r.Ip
+            if ($z -lt (ConvertTo-IpZahl $p.Start) -or $z -gt (ConvertTo-IpZahl $p.Ende)) { $konfig.Fehler.Add("$($p.Netz): Reservierung $($r.Ip) liegt nicht im Verteilbereich $($p.Start) bis $($p.Ende).") }
+        }
+    }
+    if ($konfig.Fehler.Count) {
+        Write-Warnung "Die Datei hat $($konfig.Fehler.Count) Fehler - es wird nichts geändert:"
+        foreach ($f in $konfig.Fehler) { Write-Info "  $f" }
+        return
+    }
+    Write-Titel "Vorschau: $pfad"
+    Write-Info "Server: $(Get-DhcpFqdn) ($($konfig.ServerIp))"
+    Show-DhcpServerStand (Get-DhcpServerStand $konfig.ServerIp)
+    foreach ($p in $konfig.Plaene) { Write-Host ''; Show-DhcpPlan $p }
+    if ($konfig.DnsIntegration) { Write-Info 'DnsIntegration = true: danach DNS-Integration (Updates, Reverse-Zone, Dienstkonto - das Passwort wird gefragt).' }
+    if (-not (Read-JaNein 'Alles jetzt so einrichten?' $true)) { Stop-Aktion }
+
+    if (-not (Initialize-DhcpServer $konfig.ServerIp -Bestaetigt)) { Write-Warnung 'Server ist noch nicht bereit - Bereiche werden nicht angelegt.'; return }
+    foreach ($p in $konfig.Plaene) { [void](New-DhcpBereichAusPlan $p) }
+    if ($konfig.DnsIntegration) { Start-DhcpDnsIntegration -Plaene $konfig.Plaene -Automatisch }
+    Write-Ok 'Fertig - Details stehen im Protokoll ([P]).'
+}
+#endregion
+
+#region ======================= DHCP-DNS-INTEGRATION =================
+# DHCP trägt Clients mit A- und PTR-Eintrag ins DNS ein und löscht sie bei Ablauf der Lease.
+# Läuft DHCP auf einem DC, laufen die Updates über ein eigenes Dienstkonto (sonst gehören die
+# Einträge dem Computerkonto des DCs) - siehe docs/DHCP.md. Das Passwort wird nur als
+# SecureString verarbeitet und nie protokolliert.
+
+$script:DhcpDnsKontoVorschlag = 'svc-dhcp-dns'
+
+# Reverse-Zonen für ein DHCP-Netz: /24-Zonen, wenn höchstens vier nötig sind, sonst /16,
+# sonst /8. Rückgabe wie ConvertTo-ReverseZonenName (Zone, NetworkId, Fehler)
+function Get-ReverseZonenFuerNetz([string]$Netz, [int]$Praefix) {
+    $zahl = ConvertTo-IpZahl $Netz
+    if ($null -eq $zahl -or $Praefix -lt 8 -or $Praefix -gt 32) { return @() }
+    $ziel = 8
+    foreach ($z in 24, 16) {
+        if ($Praefix -ge $z -or ([int64]1 -shl ($z - $Praefix)) -le 4) { $ziel = $z; break }
+    }
+    $anzahl  = if ($Praefix -ge $ziel) { 1 } else { [int64]1 -shl ($ziel - $Praefix) }
+    $schritt = [int64]1 -shl (32 - $ziel)
+    $basis   = $zahl - ($zahl % $schritt)
+    $liste = for ($i = 0; $i -lt $anzahl; $i++) {
+        $o = Get-IpOktette ($basis + $i * $schritt)
+        ConvertTo-ReverseZonenName ((@($o[0..($ziel / 8 - 1)]) -join '.') + "/$ziel")
+    }
+    return @($liste)
+}
+
+# Passende (längste) Forward-Zone für einen vollständigen Namen -> Zone, Name ('' = keine)
+function Get-DnsZoneFuerName([string]$Fqdn, [string[]]$Zonen) {
+    $f = "$Fqdn".Trim().TrimEnd('.').ToLower()
+    $beste = @($Zonen | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('.').ToLower() } |
+               Where-Object { $f -eq $_ -or $f.EndsWith(".$_") } | Sort-Object Length -Descending) | Select-Object -First 1
+    if (-not $beste) { return [pscustomobject]@{ Zone = ''; Name = '' } }
+    $name = if ($f -eq $beste) { '@' } else { $f.Substring(0, $f.Length - $beste.Length - 1) }
+    return [pscustomobject]@{ Zone = $beste; Name = $name }
+}
+
+# Soll-Einstellungen von DHCP für DNS: Abweichungen als Liste (leer = alles richtig)
+function Get-DhcpDnsAbweichungen($Einstellung) {
+    $liste = [System.Collections.Generic.List[string]]::new()
+    if ("$($Einstellung.DynamicUpdates)" -ne 'Always') { $liste.Add("Dynamische Updates: $($Einstellung.DynamicUpdates) -> Always (immer)") }
+    if (-not $Einstellung.DeleteDnsRROnLeaseExpiry) { $liste.Add('Einträge bei Ablauf der Lease löschen: nein -> ja') }
+    if (-not $Einstellung.UpdateDnsRRForOlderClients) { $liste.Add('Auch für ältere Clients eintragen: nein -> ja') }
+    if ($Einstellung.DisableDnsPtrRRUpdate) { $liste.Add('PTR-Einträge aktualisieren: aus -> an') }
+    return $liste.ToArray()
+}
+
+function Get-DhcpDnsEinstellung([string]$ScopeId = '') {
+    $param = @{ ErrorAction = 'Stop' }
+    if ($ScopeId) { $param.ScopeId = $ScopeId }
+    return (Get-DhcpServerv4DnsSetting @param)
+}
+
+# DHCP-DNS-Einstellungen auf Serverebene setzen (gilt für alle Bereiche ohne eigene Einstellung)
+function Set-DhcpDnsEinstellungen {
+    $alt = Get-DhcpDnsEinstellung
+    $abw = @(Get-DhcpDnsAbweichungen $alt)
+    if ($abw.Count -eq 0) { Add-Ergebnis 'DHCP-DNS' 'Always, löschen bei Ablauf, ältere Clients' $env:COMPUTERNAME 'VORHANDEN'; return }
+    try {
+        Set-DhcpServerv4DnsSetting -DynamicUpdates Always -DeleteDnsRROnLeaseExpiry $true -UpdateDnsRRForOlderClients $true -DisableDnsPtrRRUpdate $false -ErrorAction Stop
+        Add-Ergebnis 'DHCP-DNS' 'Always, löschen bei Ablauf, ältere Clients' $env:COMPUTERNAME 'OK' ($abw -join '; ')
+    }
+    catch { Add-Ergebnis 'DHCP-DNS' 'Always, löschen bei Ablauf, ältere Clients' $env:COMPUTERNAME 'FEHLER' $_.Exception.Message }
+    # Bereiche mit eigener, abweichender Einstellung ebenfalls anpassen
+    foreach ($b in @(Get-DhcpBereiche)) {
+        $id = "$($b.ScopeId)"
+        try { $abwB = @(Get-DhcpDnsAbweichungen (Get-DhcpDnsEinstellung $id)) } catch { continue }
+        if ($abwB.Count -eq 0) { continue }
+        try {
+            Set-DhcpServerv4DnsSetting -ScopeId $id -DynamicUpdates Always -DeleteDnsRROnLeaseExpiry $true -UpdateDnsRRForOlderClients $true -DisableDnsPtrRRUpdate $false -ErrorAction Stop
+            Add-Ergebnis 'DHCP-DNS' "Bereich $id" $id 'OK' ($abwB -join '; ')
+        }
+        catch { Add-Ergebnis 'DHCP-DNS' "Bereich $id" $id 'FEHLER' $_.Exception.Message }
+    }
+}
+
+# Pläne für Reverse-Zonen der DHCP-Netze: Neu / Sicher machen / Vorhanden
+function Get-DhcpReverseZonenPlan([object[]]$Netze) {
+    $dns = Get-DnsParameter
+    $plaene = [System.Collections.Generic.List[object]]::new()
+    foreach ($n in $Netze) {
+        foreach ($r in @(Get-ReverseZonenFuerNetz $n.Netz $n.Praefix)) {
+            if ($r.Fehler -or @($plaene | Where-Object { $_.Zone -eq $r.Zone }).Count) { continue }
+            $zone = Get-DnsServerZone -Name $r.Zone @dns -ErrorAction SilentlyContinue
+            $art = if (-not $zone) { 'Neu' } elseif ("$($zone.DynamicUpdate)" -ne 'Secure' -and $zone.IsDsIntegrated) { 'Sicher' } else { 'Vorhanden' }
+            $plaene.Add([pscustomobject]@{ Zone = $r.Zone; NetworkId = $r.NetworkId; Art = $art; Updates = $(if ($zone) { "$($zone.DynamicUpdate)" } else { '' }) })
+        }
+    }
+    return $plaene.ToArray()
+}
+
+function Invoke-DhcpReverseZonenPlan([object[]]$Plaene) {
+    $dns = Get-DnsParameter
+    $ad  = Test-DnsServerIstDc
+    $optionen = [pscustomobject]@{ AdIntegriert = $ad; DynamicUpdate = $(if ($ad) { 'Secure' } else { 'NonsecureAndSecure' }) }
+    foreach ($p in $Plaene) {
+        switch ($p.Art) {
+            'Neu'       { [void](New-DnsZone -Zone $p.Zone -NetworkId $p.NetworkId -Optionen $optionen) }
+            'Vorhanden' { Add-Ergebnis 'DNS-Zone' $p.Zone $p.Zone 'VORHANDEN' "Updates: $($p.Updates)" }
+            'Sicher' {
+                try {
+                    Set-DnsServerPrimaryZone -Name $p.Zone -DynamicUpdate Secure @dns -ErrorAction Stop
+                    Add-Ergebnis 'DNS-Zone-Updates' $p.Zone $p.Zone 'OK' "vorher $($p.Updates), jetzt Secure (nur sichere)"
+                }
+                catch { Add-Ergebnis 'DNS-Zone-Updates' $p.Zone $p.Zone 'FEHLER' $_.Exception.Message }
+            }
+        }
+    }
+}
+
+# Passwort eines vorhandenen Kontos prüfen ($null = Prüfung nicht möglich). Klartext nur kurz im Speicher.
+function Test-DienstkontoPasswort([string]$Sam, [securestring]$Passwort) {
+    try {
+        Add-Type -AssemblyName System.DirectoryServices.AccountManagement -ErrorAction Stop
+        $kontext = [System.DirectoryServices.AccountManagement.PrincipalContext]::new('Domain', $Domain.DNSRoot)
+        try { return $kontext.ValidateCredentials($Sam, (ConvertTo-Klartext $Passwort)) }
+        finally { $kontext.Dispose() }
+    }
+    catch { return $null }
+}
+
+# Dienstkonto wählen oder anlegen -> Konto (Sam, DN, Neu) + Passwort (SecureString)
+function Read-DhcpDnsKonto {
+    $aktuell = $null
+    try { $aktuell = Get-DhcpServerDnsCredential -ErrorAction Stop } catch { $aktuell = $null }
+    $vorschlag = if ($aktuell -and "$($aktuell.UserName)") { "$($aktuell.UserName)" } else { $script:DhcpDnsKontoVorschlag }
+    if ($aktuell -and "$($aktuell.UserName)") { Write-Info "Hinterlegt ist bisher: $($aktuell.DomainName)\$($aktuell.UserName)" }
+    while ($true) {
+        $sam = Read-Text 'Dienstkonto für die DNS-Updates (Anmeldename)' $vorschlag -Pflicht
+        if ($sam -match '["/\\\[\]:;|=,+*?<>\s@]' -or $sam.Length -gt 20) { Write-Warnung 'Ungültiger Anmeldename (max. 20 Zeichen, ohne Leer- und Sonderzeichen).'; continue }
+        $vorhanden = Get-ADUser -LDAPFilter "(sAMAccountName=$(ConvertTo-LdapWert $sam))" -Properties PasswordNeverExpires -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $vorhanden -and (Test-SamVorhanden $sam)) { Write-Warnung "'$sam' ist schon von einem anderen Objekt (z.B. Gruppe) belegt."; continue }
+        break
+    }
+    if ($vorhanden) {
+        Write-Info "Konto vorhanden: $($vorhanden.DistinguishedName)"
+        if ($aktuell -and "$($aktuell.UserName)" -eq $sam -and -not (Read-JaNein 'Ist schon hinterlegt. Passwort neu hinterlegen?' $false)) {
+            return [pscustomobject]@{ Sam = $sam; DN = $vorhanden.DistinguishedName; Neu = $false; Passwort = $null; Behalten = $true }
+        }
+        while ($true) {
+            $pw = Read-Host "  Passwort von $sam (wird nicht angezeigt und nicht protokolliert)" -AsSecureString
+            $ok = Test-DienstkontoPasswort $sam $pw
+            if ($ok -eq $false) { Write-Warnung 'Das Passwort stimmt nicht.'; continue }
+            if ($null -eq $ok) { Write-Info 'Passwort konnte nicht geprüft werden - wird so hinterlegt.' }
+            break
+        }
+        return [pscustomobject]@{ Sam = $sam; DN = $vorhanden.DistinguishedName; Neu = $false; Passwort = $pw; Behalten = $false }
+    }
+    Write-Info "Das Konto '$sam' wird neu angelegt: normaler Domänenbenutzer, Passwort läuft nicht ab, keine weiteren Rechte."
+    $ziel = $Domain.UsersContainer
+    if (-not (Read-JaNein "Im Standard-Container $(Get-Kurzpfad $ziel) anlegen?" $true)) { $ziel = Select-AdZiel 'das Dienstkonto' }
+    $pw = Read-Passwort $sam
+    return [pscustomobject]@{ Sam = $sam; DN = "CN=$sam,$ziel"; Ziel = $ziel; Neu = $true; Passwort = $pw; Behalten = $false }
+}
+
+# Konto anlegen (falls neu) und bei DHCP hinterlegen. Das Passwort landet nur im PSCredential.
+function Set-DhcpDnsKonto($Konto) {
+    $anzeige = "$($Domain.NetBIOSName)\$($Konto.Sam)"
+    if ($Konto.Neu) {
+        try {
+            $u = New-ADUser -Name $Konto.Sam -SamAccountName $Konto.Sam -UserPrincipalName "$($Konto.Sam)@$($Domain.DNSRoot)" `
+                            -Path $Konto.Ziel -AccountPassword $Konto.Passwort -Enabled $true -PasswordNeverExpires $true `
+                            -CannotChangePassword $true -Description 'DHCP: dynamische DNS-Updates (AD-Schnellanlage)' -PassThru -ErrorAction Stop
+            Add-Ergebnis 'Benutzer' $Konto.Sam $u.DistinguishedName 'OK' 'Dienstkonto DHCP-DNS, Passwort läuft nicht ab'
+        }
+        catch { Add-Ergebnis 'Benutzer' $Konto.Sam $Konto.DN 'FEHLER' $_.Exception.Message; return }
+    }
+    if ($Konto.Behalten) { Add-Ergebnis 'DHCP-DNS-Konto' $anzeige $env:COMPUTERNAME 'VORHANDEN'; return }
+    try {
+        $cred = New-Object System.Management.Automation.PSCredential($anzeige, $Konto.Passwort)
+        Set-DhcpServerDnsCredential -Credential $cred -ErrorAction Stop
+        Add-Ergebnis 'DHCP-DNS-Konto' $anzeige $env:COMPUTERNAME 'OK' 'hinterlegt (Passwort wird nicht protokolliert)'
+    }
+    catch { Add-Ergebnis 'DHCP-DNS-Konto' $anzeige $env:COMPUTERNAME 'FEHLER' $_.Exception.Message }
+}
+
+# Alterung/Bereinigung (Scavenging): Zonen + Server, je 7 Tage
+function Set-DnsAlterung([string[]]$Zonen) {
+    $dns = Get-DnsParameter
+    $sieben = [TimeSpan]::FromDays(7)
+    foreach ($z in @($Zonen | Where-Object { $_ } | Select-Object -Unique)) {
+        try {
+            $alt = Get-DnsServerZoneAging -Name $z @dns -ErrorAction Stop
+            if ($alt.AgingEnabled) { Add-Ergebnis 'DNS-Alterung' $z $z 'VORHANDEN'; continue }
+            Set-DnsServerZoneAging -Name $z -Aging $true -RefreshInterval $sieben -NoRefreshInterval $sieben @dns -ErrorAction Stop
+            Add-Ergebnis 'DNS-Alterung' $z $z 'OK' 'Refresh 7 Tage, kein Refresh 7 Tage'
+        }
+        catch { Add-Ergebnis 'DNS-Alterung' $z $z 'FEHLER' $_.Exception.Message }
+    }
+    try {
+        $s = Get-DnsServerScavenging @dns -ErrorAction Stop
+        if ($s.ScavengingState) { Add-Ergebnis 'DNS-Alterung' 'Server-Bereinigung' (Get-DnsServerAnzeige) 'VORHANDEN' "alle $($s.ScavengingInterval)" ; return }
+        Set-DnsServerScavenging -ScavengingState $true -ScavengingInterval $sieben @dns -ErrorAction Stop
+        Add-Ergebnis 'DNS-Alterung' 'Server-Bereinigung' (Get-DnsServerAnzeige) 'OK' 'alle 7 Tage'
+    }
+    catch { Add-Ergebnis 'DNS-Alterung' 'Server-Bereinigung' (Get-DnsServerAnzeige) 'FEHLER' $_.Exception.Message }
+}
+
+# [H][8] DNS-Integration einrichten. $Plaene (aus Datei/Assistent) = diese Netze, sonst alle Bereiche.
+# -Automatisch: ohne Rückfrage zur Übersicht, Alterung bleibt aus (Passwort wird trotzdem gefragt)
+function Start-DhcpDnsIntegration([object[]]$Plaene = @(), [switch]$Automatisch) {
+    Write-Titel 'DNS-Integration für DHCP einrichten'
+    if (-not $script:Faehig.DHCP) { Write-Warnung "DHCP nicht verfügbar: $($script:Faehig.Grund.DHCP)"; return }
+    if (-not $script:Faehig.AD) { Write-Warnung "Kein Active Directory: $($script:Faehig.Grund.AD)"; return }
+    $netze = if (@($Plaene).Count) { @($Plaene | ForEach-Object { [pscustomobject]@{ Netz = $_.Netz; Praefix = [int]$_.Praefix } }) }
+             else { @(Get-DhcpBereiche | ForEach-Object { [pscustomobject]@{ Netz = "$($_.ScopeId)"; Praefix = [int](Get-PraefixAusEingabe "$($_.SubnetMask)") } }) }
+    if ($netze.Count -eq 0) { Write-Warnung 'Noch kein DHCP-Bereich - zuerst unter [3] anlegen.'; return }
+
+    $abw = @(Get-DhcpDnsAbweichungen (Get-DhcpDnsEinstellung))
+    $zonen = @()
+    if ($script:Faehig.DNS) { $zonen = @(Get-DhcpReverseZonenPlan $netze) }
+    else { Write-Warnung "DNS nicht verfügbar ($($script:Faehig.Grund.DNS)) - Reverse-Zonen bitte später unter [D][4] anlegen." }
+
+    Write-Info 'Geplant:'
+    if ($abw.Count) { foreach ($a in $abw) { Write-Host "    DHCP      $a" -ForegroundColor White } }
+    else { Write-Host '    DHCP      Einstellungen stimmen schon (Always, löschen bei Ablauf, ältere Clients)' -ForegroundColor Yellow }
+    foreach ($z in $zonen) {
+        switch ($z.Art) {
+            'Neu'       { Write-Host "    Zone      $($z.Zone)   neu ($($z.NetworkId), nur sichere Updates)" -ForegroundColor White }
+            'Sicher'    { Write-Host "    Zone      $($z.Zone)   Updates $($z.Updates) -> nur sichere" -ForegroundColor White }
+            'Vorhanden' { Write-Host "    Zone      $($z.Zone)   vorhanden (Updates $($z.Updates))" -ForegroundColor Yellow }
+        }
+    }
+    Write-Host '    Konto     Dienstkonto für DNS-Updates (wird gleich gefragt)' -ForegroundColor White
+    if (-not $Automatisch -and $Funktionen.Vorschau -and -not (Read-JaNein 'So einrichten?' $true)) { Stop-Aktion }
+
+    $konto = Read-DhcpDnsKonto
+    Set-DhcpDnsEinstellungen
+    if ($zonen.Count) { Invoke-DhcpReverseZonenPlan $zonen }
+    Set-DhcpDnsKonto $konto
+
+    if ($script:Faehig.DNS -and -not $Automatisch) {
+        Write-Host ''
+        Write-Info 'Alterung/Bereinigung (Scavenging): Der DNS-Server löscht dynamische Einträge, die 14 Tage nicht'
+        Write-Info 'erneuert wurden (7 Tage kein Refresh + 7 Tage Refresh), Prüfung alle 7 Tage. Statische Einträge'
+        Write-Info 'bleiben. Hilft gegen Leichen von Geräten, die nie ordentlich abgemeldet wurden.'
+        if (Read-JaNein 'Alterung/Bereinigung für die Reverse-Zone(n) und die Domänen-Zone aktivieren?' $false) {
+            Set-DnsAlterung (@($zonen | ForEach-Object { $_.Zone }) + @($Domain.DNSRoot))
+        }
+    }
+    Write-Ok 'DNS-Integration eingerichtet. Neue Leases erscheinen mit A- und PTR-Eintrag - prüfen mit [9].'
+}
+
+# Für jede Lease mit Hostname: A- und PTR-Eintrag vorhanden? -> Zeilen
+function Get-DhcpLeaseDnsStand([object[]]$Leases, [string[]]$ForwardZonen, [string[]]$ReverseZonen) {
+    $dns = Get-DnsParameter
+    $zeilen = foreach ($l in @($Leases | Where-Object { "$($_.HostName)" })) {
+        $ip   = "$($l.IPAddress)"
+        $fqdn = "$($l.HostName)".TrimEnd('.').ToLower()
+        if (-not $fqdn.Contains('.') -and $Domain) { $fqdn = "$fqdn.$($Domain.DNSRoot)".ToLower() }
+        $a = 'keine Zone'
+        $f = Get-DnsZoneFuerName $fqdn $ForwardZonen
+        if ($f.Zone) {
+            $rr = @(Get-DnsServerResourceRecord -ZoneName $f.Zone -Name $f.Name -RRType A @dns -ErrorAction SilentlyContinue)
+            $a = if (@($rr | Where-Object { "$($_.RecordData.IPv4Address)" -eq $ip }).Count) { 'ja' } elseif ($rr.Count) { 'andere IP' } else { 'nein' }
+        }
+        $ptr = 'keine Zone'
+        $r = Get-PtrZielFuerIp $ip $ReverseZonen
+        if ($r.Zone) {
+            $rr = @(Get-DnsServerResourceRecord -ZoneName $r.Zone -Name $r.Name -RRType Ptr @dns -ErrorAction SilentlyContinue)
+            $ptr = if (@($rr | Where-Object { "$($_.RecordData.PtrDomainName)".TrimEnd('.').ToLower() -eq $fqdn }).Count) { 'ja' } elseif ($rr.Count) { 'anderer Name' } else { 'nein' }
+        }
+        [pscustomobject]@{ IP = $ip; Hostname = $fqdn; A = $a; PTR = $ptr }
+    }
+    return @($zeilen)
+}
+
+# [H][9] DNS-Integration prüfen
+function Show-DhcpDnsPruefung {
+    Write-Titel 'DNS-Integration prüfen'
+    $e = Get-DhcpDnsEinstellung
+    $jn = { param($W) if ($W) { 'ja' } else { 'nein' } }
+    Write-Info "Dynamische Updates:              $($e.DynamicUpdates)"
+    Write-Info "Löschen bei Ablauf der Lease:    $(& $jn $e.DeleteDnsRROnLeaseExpiry)"
+    Write-Info "Auch für ältere Clients:         $(& $jn $e.UpdateDnsRRForOlderClients)"
+    Write-Info "PTR-Einträge aktualisieren:      $(& $jn (-not $e.DisableDnsPtrRRUpdate))"
+    $abw = @(Get-DhcpDnsAbweichungen $e)
+    if ($abw.Count) { Write-Warnung "Weicht ab: $($abw -join '; ') - mit [8] einrichten." } else { Write-Ok 'DHCP-Einstellungen für DNS stimmen.' }
+    try {
+        $k = Get-DhcpServerDnsCredential -ErrorAction Stop
+        if ("$($k.UserName)") { Write-Info "Dienstkonto:                     $($k.DomainName)\$($k.UserName)" }
+        else { Write-Warnung 'Kein Dienstkonto hinterlegt - Updates laufen über das Computerkonto (auf einem DC nicht empfohlen).' }
+    }
+    catch { Write-Warnung "Dienstkonto nicht lesbar: $($_.Exception.Message)" }
+    if (-not $script:Faehig.DNS) { Write-Warnung "DNS nicht verfügbar ($($script:Faehig.Grund.DNS)) - A/PTR-Prüfung übersprungen."; return }
+
+    $forward = @(Get-DnsZonen -Forward | ForEach-Object { $_.ZoneName })
+    $reverse = @(Get-DnsZonen -Reverse | ForEach-Object { $_.ZoneName })
+    foreach ($b in @(Get-DhcpBereiche)) {
+        $id = "$($b.ScopeId)"
+        $praefix = [int](Get-PraefixAusEingabe "$($b.SubnetMask)")
+        Write-Host ''
+        Write-Host "  Bereich $id/$praefix ($($b.Name))" -ForegroundColor Cyan
+        foreach ($z in @(Get-ReverseZonenFuerNetz $id $praefix)) {
+            if ($reverse -contains $z.Zone) { Write-Info "Reverse-Zone $($z.Zone): vorhanden" } else { Write-Warnung "Reverse-Zone $($z.Zone) fehlt - mit [8] anlegen." }
+        }
+        $zeilen = @(Get-DhcpLeaseDnsStand @(Get-DhcpServerv4Lease -ScopeId $id -ErrorAction SilentlyContinue) $forward $reverse)
+        if ($zeilen.Count -eq 0) { Write-Info 'Keine Leases mit Hostname.'; continue }
+        $zeilen | Format-Table -AutoSize | Out-Host
+        $ok = @($zeilen | Where-Object { $_.A -eq 'ja' -and $_.PTR -eq 'ja' }).Count
+        if ($ok -eq $zeilen.Count) { Write-Ok "Alle $ok Lease(s) haben A- und PTR-Eintrag." }
+        else { Write-Warnung "$($zeilen.Count - $ok) von $($zeilen.Count) Lease(s) ohne vollständigen A-/PTR-Eintrag (Client neu verbinden: ipconfig /release + /renew)." }
+    }
+}
+#endregion
+
 #region ======================= [P] PROTOKOLL ========================
 
 function Show-Protokoll {
@@ -2751,8 +4903,8 @@ function Test-Adminrechte {
 }
 
 # Was kann dieser Server? Ändert nichts und bricht nie ab.
-# Rückgabe: AD, DNS, DnsRolle, DnsDienst, Smb, Gui, Admin, ServerManager, GpoDatei,
-#           GroupPolicy, GPO, DhcpDatei, DhcpRolle, DhcpDienst, DhcpModul, DHCP ($true/$false),
+# Rückgabe: AD, DNS, DnsRolle, DnsDienst, Smb, Gui, Admin, ServerManager,
+#           GroupPolicy, GPO, DhcpRolle, DhcpDienst, DhcpModul, DHCP ($true/$false),
 #           Domain (Ergebnis von Get-ADDomain) und Grund (Text je fehlender Fähigkeit)
 function Get-Faehigkeiten {
     $f = @{
@@ -2806,17 +4958,14 @@ function Get-Faehigkeiten {
     else                                          { $f.DNS = $true }
     if (-not $f.DnsClient) { $f.Grund.DnsClient = 'DNS - Resolve-DnsName fehlt (Modul DnsClient)' }
 
-    # Gruppenrichtlinien: Teilmodul-Datei, AD und Modul GroupPolicy (Feature GPMC)
-    $f.GpoDatei    = [bool]($script:Teilmodule -and $script:Teilmodule['GPO'])
+    # Gruppenrichtlinien: AD und Modul GroupPolicy (Feature GPMC)
     $f.GroupPolicy = Import-ModulStill 'GroupPolicy'
     $f.GPO         = $f.AD -and $f.GroupPolicy
-    if (-not $f.GpoDatei)    { $f.Grund.GpoDatei = 'GPO - Datei Module\GPO.psm1 fehlt neben dem Script' }
     if (-not $f.GroupPolicy) { $f.Grund.GroupPolicy = 'GPO - Modul GroupPolicy fehlt (Feature GPMC, im Menü [G] installierbar)' }
     if (-not $f.GPO)         { $f.Grund.GPO = if (-not $f.AD) { $f.Grund.AD } else { $f.Grund.GroupPolicy } }
     if (-not $f.ServerManager) { $f.Grund.ServerManager = 'Modul ServerManager fehlt - Rollen hier nicht installierbar' }
 
-    # DHCP: Teilmodul-Datei, Rolle (Windows-Feature), Dienst, Modul DhcpServer - lokal
-    $f.DhcpDatei = [bool]($script:Teilmodule -and $script:Teilmodule['DHCP'])
+    # DHCP: Rolle (Windows-Feature), Dienst, Modul DhcpServer - lokal
     $f.DhcpRolle = $false
     if ($f.ServerManager) {
         try   { $f.DhcpRolle = [bool](Get-WindowsFeature -Name DHCP -ErrorAction Stop).Installed }
@@ -2827,7 +4976,6 @@ function Get-Faehigkeiten {
     $f.DhcpDienst = [bool]($dhcpDienst -and "$($dhcpDienst.Status)" -eq 'Running')
     $f.DhcpModul  = Import-ModulStill 'DhcpServer'
     $f.DHCP       = $false
-    if (-not $f.DhcpDatei)      { $f.Grund.DhcpDatei = 'DHCP - Datei Module\DHCP.psm1 fehlt neben dem Script' }
     if (-not $f.DhcpRolle)      { $f.Grund.DHCP = 'DHCP - Rolle nicht installiert' }
     elseif (-not $f.DhcpDienst) { $f.Grund.DHCP = 'DHCP - Dienst läuft nicht' }
     elseif (-not $f.DhcpModul)  { $f.Grund.DHCP = 'DHCP - Modul DhcpServer fehlt (Feature RSAT-DHCP)' }
@@ -2862,7 +5010,7 @@ function Initialize-AdUmgebung {
     if ($richtlinie) { $script:PwRichtlinie = $richtlinie }
 }
 
-# Windows-Feature installieren (für Teilmodule, z.B. GPMC). Fehlen die Installationsdateien
+# Windows-Feature installieren (z.B. GPMC, DHCP). Fehlen die Installationsdateien
 # (Server offline), wird nach dem Ordner \sources\sxs gefragt (-Source).
 # $true = Feature ist danach installiert; die Fähigkeiten sind neu geprüft.
 function Install-WindowsRolle {
@@ -2917,8 +5065,8 @@ function Get-Hauptmenue {
         [pscustomobject]@{ Taste = '7'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
         [pscustomobject]@{ Taste = '8'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
         [pscustomobject]@{ Taste = 'D'; Text = 'DNS: Zonen, Einträge, PTR, Weiterleitungen';                  An = $Funktionen.DNS;              Braucht = @();     Aktion = { Start-DnsMenue } }
-        [pscustomobject]@{ Taste = 'G'; Text = 'Gruppenrichtlinien: GPOs, Netzlaufwerke, Standard-Richtlinien'; An = $Funktionen.GPO;              Braucht = @('AD', 'GpoDatei'); Aktion = { Start-GpoMenue } }
-        [pscustomobject]@{ Taste = 'H'; Text = 'DHCP: Einrichtungs-Assistent, Bereiche, Reservierungen';       An = $Funktionen.DHCP;             Braucht = @('DhcpDatei'); Aktion = { Start-DhcpMenue } }
+        [pscustomobject]@{ Taste = 'G'; Text = 'Gruppenrichtlinien: GPOs, Netzlaufwerke, Standard-Richtlinien'; An = $Funktionen.GPO;              Braucht = @('AD'); Aktion = { Start-GpoMenue } }
+        [pscustomobject]@{ Taste = 'H'; Text = 'DHCP: Einrichtungs-Assistent, Bereiche, Reservierungen';       An = $Funktionen.DHCP;             Braucht = @();     Aktion = { Start-DhcpMenue } }
         [pscustomobject]@{ Taste = 'S'; Text = 'Subnetzrechner (IPv4: Netz, Broadcast, Hosts)';              An = $Funktionen.Subnetzrechner;   Braucht = @();     Aktion = { Start-Subnetzrechner } }
         [pscustomobject]@{ Taste = 'E'; Text = 'Einstellungen ansehen und ändern';                            An = $true;                        Braucht = @();     Aktion = { Start-Einstellungen } }
         [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }
@@ -2935,23 +5083,6 @@ function Show-Startanzeige {
              else                       { 'Konsole (Auswahlfenster abgeschaltet)' }
     Write-Info "Auswahlmodus:     $modus"
     if (-not $f.Admin) { Write-Warnung 'Keine Administratorrechte - Änderungen am Server schlagen wahrscheinlich fehl. Script "Als Administrator" starten.' }
-}
-#endregion
-
-#region ======================= TEILMODULE ==========================
-# Größere Bereiche liegen als eigene Dateien in Module\<Name>.psm1 neben dem Script. Sie werden
-# hier in den Script-Bereich geladen (nicht per Import-Module), damit sie Eingabe, Protokoll,
-# Einstellungen und Fähigkeiten des Hauptscripts mitbenutzen. Fehlt eine Datei, fehlen nur
-# ihre Menüpunkte (Grund steht im Menü). Pester lädt die Teilmodule beim Dot-Sourcing mit.
-$script:Teilmodule = @{}
-foreach ($teilmodul in @('GPO', 'DHCP')) {
-    $teilmodulPfad = Join-Path (Join-Path $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }) 'Module') "$teilmodul.psm1"
-    if (-not (Test-Path -LiteralPath $teilmodulPfad -PathType Leaf)) { continue }
-    try {
-        . ([scriptblock]::Create([System.IO.File]::ReadAllText($teilmodulPfad)))
-        $script:Teilmodule[$teilmodul] = $teilmodulPfad
-    }
-    catch { Write-Warnung "Teilmodul $teilmodul.psm1 nicht geladen: $($_.Exception.Message)" }
 }
 #endregion
 
