@@ -36,8 +36,8 @@ Mit `$Funktionen` abgeschaltete Punkte sind wie bisher ganz ausgeblendet.
 Jede Sitzung schreibt ein CSV-Protokoll nach `AD-Schnellanlage-Protokolle\AD-Anlage_<Datum>.csv`
 neben dem Script (Spalten `Zeit;Typ;Name;Status;DN;Bezug;Info`).
 
-[9] liest ein Protokoll und entfernt in dieser Reihenfolge: Mitgliedschaften, Freigaben,
-Benutzer, Gruppen, OUs (nur leere). Ordner, NTFS-Rechte und Home-Ordner werden **nicht**
+[9] liest ein Protokoll und entfernt in dieser Reihenfolge: DNS-Einträge, DNS-Zonen (nur leere),
+Mitgliedschaften, Freigaben, Benutzer, Gruppen, OUs (nur leere). Details zu DNS: [DNS.md](DNS.md). Ordner, NTFS-Rechte und Home-Ordner werden **nicht**
 gelöscht, sondern nur aufgelistet.
 
 Zufallspasswörter werden als `Passwoerter_<Datum>.csv` im selben Ordner gespeichert –

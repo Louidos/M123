@@ -5,8 +5,9 @@
 
 .DESCRIPTION
     Interaktives Menue fuer Windows Server.
-    Nutzt ausschliesslich Bordmittel: ActiveDirectory-Modul, SmbShare-Modul,
-    .NET und - wenn vorhanden - Out-GridView. Keine externen Programme.
+    Nutzt ausschliesslich Bordmittel: Module ActiveDirectory, DnsServer, ServerManager,
+    SmbShare, DnsClient, .NET und - wenn vorhanden - Out-GridView. Keine externen
+    Programme, kein Internet.
 
     Das Script prueft beim Start, was auf dem Server vorhanden ist (Active Directory,
     DNS-Rolle, SMB, Auswahlfenster, Adminrechte). Menuepunkte, die hier nicht laufen
@@ -21,7 +22,10 @@
       [6] AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte
       [7] Abteilung komplett: OU + Unter-OUs + Gruppen + Ordner + Benutzer
       [8] Mitglieder zu Gruppen hinzufuegen
-      [9] Rueckgaengig machen anhand des Protokolls
+      [9] Rueckgaengig machen anhand des Protokolls (AD und DNS)
+      [D] DNS: Status, Rolle installieren, Forward-/Reverse-Zonen, Eintraege per
+          Schnelleingabe (srv01=192.168.10.5, www=srv01, @=MX:mail:10) mit
+          automatischem PTR, fehlende PTR auffuellen, Weiterleitungen, Namensaufloesung
       [P] Protokoll der Sitzung anzeigen
 
 .NOTES
@@ -78,6 +82,13 @@ $AbteilungsUnterOUs  = @('Benutzer', 'Gruppen', 'Computer')   # @() = keine Unte
 $AbteilungBenutzerOU = 'Benutzer' # Unter-OU für neue Benutzer
 $AbteilungGruppenOU  = 'Gruppen'  # Unter-OU für neue Gruppen
 
+# --- DNS -------------------------------------------------------------
+$DnsServerName       = ''         # leer = dieser Server (auf einem DC der DC selbst); sonst Name des DNS-Servers
+$DnsReplikation      = 'Domain'   # AD-integrierte Zonen: Domain / Forest / Legacy
+$DnsStandardTTL      = '01:00:00' # Vorschlag für neue Einträge (hh:mm:ss)
+$DnsAutoPTR          = $true      # bei A/AAAA automatisch den PTR-Eintrag mit anlegen
+$DnsWeiterleitungen  = @()        # Vorschlag für Weiterleitungen, z.B. @('192.168.10.1', '192.168.10.2')
+
 # --- Protokoll -------------------------------------------------------
 $LogOrdner           = ''         # leer = Ordner "AD-Schnellanlage-Protokolle" neben dem Script
 
@@ -93,6 +104,7 @@ $Funktionen = [ordered]@{
     Abteilung           = $true   # [7]
     Mitgliedschaften    = $true   # [8]
     Rueckgaengig        = $true   # [9] (braucht Protokoll)
+    DNS                 = $true   # [D] DNS-Menü
     # Zusatzschritte in den Abläufen
     Schnelleingabe      = $true   # Benutzer: alle Namen in einer Zeile
     ZufallsPasswort     = $true   # Benutzer: zufällige Passwörter + Liste
@@ -106,6 +118,13 @@ $Funktionen = [ordered]@{
     FensterAuswahl      = $true   # Auswahlfenster (Out-GridView), sonst Konsole
     Vorschau            = $true   # vor dem Erstellen alles anzeigen + bestätigen
     Protokoll           = $true   # CSV-Protokoll jeder Sitzung
+    # Punkte im DNS-Menü [D]
+    DnsRolle            = $true   # [D][2] DNS-Rolle installieren
+    DnsZonen            = $true   # [D][3] + [4] Forward- und Reverse-Zonen
+    DnsEintraege        = $true   # [D][5] Einträge per Schnelleingabe
+    DnsPTRAuffuellen    = $true   # [D][6] fehlende PTR-Einträge auffüllen
+    DnsWeiterleitung    = $true   # [D][7] Weiterleitungen (Forwarder)
+    DnsTest             = $true   # [D][8] Namensauflösung testen
 }
 #endregion
 
@@ -385,6 +404,7 @@ function Add-Ergebnis {
         'VORHANDEN' { 'Yellow' }
         'ENTFERNT'  { 'Cyan' }
         'FEHLT'     { 'DarkYellow' }
+        'UEBERSPRUNGEN' { 'DarkYellow' }
         default     { 'Red' }
     }
     $zeile = '    [{0}] {1,-9} {2}' -f $Status, $Typ, $Name
@@ -1286,22 +1306,53 @@ function Start-Rueckgaengig {
     if ($wahl.Count -eq 0) { Stop-Aktion }
 
     $daten   = @(Import-Csv -LiteralPath $wahl[0].Datei -Delimiter ';' -Encoding UTF8 | Where-Object { $_.Status -eq 'OK' })
-    $typen   = 'Mitglied', 'Freigabe', 'Benutzer', 'Gruppe', 'OU'
+    # Reihenfolge: zuerst DNS-Einträge, dann DNS-Zonen, dann AD (Mitglieder vor Objekten, OUs zuletzt)
+    $typen   = 'DNS-Eintrag', 'DNS-Zone', 'Mitglied', 'Freigabe', 'Benutzer', 'Gruppe', 'OU'
+    $adTypen = 'Mitglied', 'Benutzer', 'Gruppe', 'OU'
     $rueck   = @($daten | Where-Object { $typen -contains $_.Typ })
     $manuell = @($daten | Where-Object { $_.Typ -in 'Ordner', 'NTFS', 'Home' } | Select-Object -ExpandProperty DN -Unique)
-    if ($rueck.Count -eq 0) { Write-Warnung 'In diesem Protokoll gibt es nichts zum Rückgängigmachen.'; return }
+    $hinweis = @($daten | Where-Object { $_.Typ -in 'DNS-Rolle', 'DNS-Forwarder' })
+    if ($rueck.Count -eq 0) {
+        Write-Warnung 'In diesem Protokoll gibt es nichts zum Rückgängigmachen.'
+        foreach ($h in $hinweis) { Write-Info "Wird nicht zurückgebaut: $($h.Typ) $($h.Name)" }
+        return
+    }
 
     Write-Info 'Wird entfernt:'
-    foreach ($gruppe in ($rueck | Group-Object Typ)) { Write-Host ('    {0,-10} {1}' -f $gruppe.Name, $gruppe.Count) -ForegroundColor White }
-    Write-Warnung 'Achtung: Diese Objekte werden aus dem AD GELÖSCHT (nicht leere OUs bleiben stehen).'
+    foreach ($gruppe in ($rueck | Group-Object Typ)) { Write-Host ('    {0,-12} {1}' -f $gruppe.Name, $gruppe.Count) -ForegroundColor White }
+    Write-Warnung 'Achtung: Diese Objekte werden aus AD bzw. DNS GELÖSCHT (nicht leere OUs und Zonen bleiben stehen).'
     if ("$(Read-Host "  Zum Bestätigen 'JA' eingeben")".Trim() -cne 'JA') { Stop-Aktion }
 
+    $dns = Get-DnsParameter
     foreach ($typ in $typen) {
         $liste = @($rueck | Where-Object { $_.Typ -eq $typ })
         if ($typ -eq 'OU') { $liste = @($liste | Sort-Object { ($_.DN -split '(?<!\\),').Count } -Descending) }
         foreach ($e in $liste) {
+            if ($adTypen -contains $typ -and -not $script:Faehig.AD) {
+                Add-Ergebnis $typ $e.Name $e.DN 'FEHLER' 'Active Directory auf diesem Server nicht verfügbar - übersprungen'
+                continue
+            }
+            if ($typ -like 'DNS-*' -and -not $script:Faehig.DNS) {
+                Add-Ergebnis $typ $e.Name $e.DN 'FEHLER' 'DNS auf diesem Server nicht verfügbar - übersprungen'
+                continue
+            }
             try {
                 switch ($typ) {
+                    'DNS-Eintrag' {
+                        # genau den protokollierten Eintrag (Name + Typ + Daten) suchen
+                        $b      = ConvertFrom-DnsBezug $e.Bezug
+                        $gesucht = Get-DnsBezug $b.Typ $b.Daten $b.Prioritaet
+                        $treffer = @(Get-DnsServerResourceRecord -ZoneName $e.DN -Name $e.Name -RRType $b.Typ @dns -ErrorAction SilentlyContinue |
+                                     Where-Object { "$($_.HostName)" -eq $e.Name -and (Get-DnsBezugAusRecord $_) -eq $gesucht })
+                        if ($treffer.Count -eq 0) { throw [System.Management.Automation.ItemNotFoundException]::new('existiert nicht mehr') }
+                        foreach ($rr in $treffer) { Remove-DnsServerResourceRecord -ZoneName $e.DN -InputObject $rr -Force @dns -ErrorAction Stop }
+                    }
+                    'DNS-Zone' {
+                        if (-not (Get-DnsServerZone -Name $e.DN @dns -ErrorAction SilentlyContinue)) { throw [System.Management.Automation.ItemNotFoundException]::new('existiert nicht mehr') }
+                        $inhalt = @(Get-DnsServerResourceRecord -ZoneName $e.DN @dns -ErrorAction Stop | Where-Object { "$($_.RecordType)" -notin 'SOA', 'NS' })
+                        if ($inhalt.Count) { throw "Zone ist nicht leer ($($inhalt.Count) Einträge) - bleibt stehen." }
+                        Remove-DnsServerZone -Name $e.DN -Force @dns -ErrorAction Stop
+                    }
                     'Mitglied' {
                         if (-not ((Test-AdObjekt $e.DN) -and (Test-AdObjekt $e.Bezug))) { throw [System.Management.Automation.ItemNotFoundException]::new('existiert nicht mehr') }
                         Remove-ADGroupMember -Identity $e.DN -Members $e.Bezug -Confirm:$false -ErrorAction Stop
@@ -1325,7 +1376,7 @@ function Start-Rueckgaengig {
                         Remove-ADOrganizationalUnit -Identity $e.DN -Confirm:$false -ErrorAction Stop
                     }
                 }
-                Add-Ergebnis $typ $e.Name $e.DN 'ENTFERNT'
+                Add-Ergebnis $typ $e.Name $e.DN 'ENTFERNT' -Bezug $e.Bezug
             }
             catch [System.Management.Automation.ItemNotFoundException] { Add-Ergebnis $typ $e.Name $e.DN 'FEHLT' 'existiert nicht mehr' }
             catch { Add-Ergebnis $typ $e.Name $e.DN 'FEHLER' $_.Exception.Message }
@@ -1334,6 +1385,770 @@ function Start-Rueckgaengig {
     if ($manuell.Count) {
         Write-Warnung 'Nicht automatisch entfernt (Ordner, NTFS-Rechte, Home-Ordner) - bei Bedarf von Hand löschen:'
         foreach ($m in $manuell) { Write-Info $m }
+    }
+    if ($hinweis.Count) {
+        Write-Warnung 'Nicht zurückgebaut (bei Bedarf von Hand): DNS-Rolle und Weiterleitungen'
+        foreach ($h in $hinweis) { Write-Info "$($h.Typ): $($h.Name)  $($h.Info)" }
+    }
+}
+#endregion
+
+#region ======================= DNS-HILFSFUNKTIONEN (ohne Server) ====
+
+# 'IPv4', 'IPv6' oder '' (streng: 192.168.10 oder 010.1.1.1 gelten nicht als IPv4)
+function Get-IpArt([string]$Text) {
+    $t = "$Text".Trim()
+    $oktett = '(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)'
+    if ($t -match "^$oktett(\.$oktett){3}$") { return 'IPv4' }
+    $adr = $null
+    if ($t.Contains(':') -and [System.Net.IPAddress]::TryParse($t, [ref]$adr) -and
+        $adr.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) { return 'IPv6' }
+    return ''
+}
+
+# Kommaliste von IP-Adressen prüfen -> Gueltig (normalisiert) und Ungueltig
+function ConvertFrom-IpListe([string]$Text) {
+    $gueltig   = [System.Collections.Generic.List[string]]::new()
+    $ungueltig = [System.Collections.Generic.List[string]]::new()
+    foreach ($teil in ($Text -split '[,; ]+' | Where-Object { $_ })) {
+        if (Get-IpArt $teil) {
+            $ip = ([System.Net.IPAddress]::Parse($teil)).ToString()
+            if (-not $gueltig.Contains($ip)) { $gueltig.Add($ip) }
+        }
+        else { $ungueltig.Add($teil) }
+    }
+    return [pscustomobject]@{ Gueltig = $gueltig.ToArray(); Ungueltig = $ungueltig.ToArray() }
+}
+
+# Hostname nach RFC 1123 prüfen: '' = in Ordnung, sonst der Grund
+function Get-DnsHostnameFehler([string]$Name) {
+    if (-not $Name) { return 'Name ist leer' }
+    $n = $Name
+    if ($n.EndsWith('.')) { $n = $n.Substring(0, $n.Length - 1) }
+    if (-not $n) { return 'Name ist leer' }
+    if ($n.Length -gt 253) { return 'Name ist länger als 253 Zeichen' }
+    foreach ($label in $n.Split('.')) {
+        if (-not $label) { return 'leerer Namensteil (zwei Punkte hintereinander)' }
+        if ($label.Length -gt 63) { return "Namensteil '$($label.Substring(0, 10))...' ist länger als 63 Zeichen ($($label.Length))" }
+        if ($label -match '[^A-Za-z0-9\-]') {
+            if ($label -match '[äöüÄÖÜß]') { return "Umlaute sind nicht erlaubt ('$label' -> '$(ConvertTo-AdName $label)')" }
+            return "ungültige Zeichen in '$label' (erlaubt: a-z, 0-9 und -)"
+        }
+        if ($label.StartsWith('-') -or $label.EndsWith('-')) { return "'$label' darf nicht mit - beginnen oder enden" }
+    }
+    return ''
+}
+
+function Test-DnsHostname([string]$Name) {
+    return (-not (Get-DnsHostnameFehler $Name))
+}
+
+# TTL-Text (hh:mm:ss oder t.hh:mm:ss) -> TimeSpan, ungültig oder 0 -> $null
+function ConvertTo-DnsTtl([string]$Text) {
+    $t = "$Text".Trim()
+    if ($t -notmatch '^(\d{1,3}\.)?\d{1,2}:[0-5]\d:[0-5]\d$') { return $null }
+    $ts = [timespan]::Zero
+    if (-not [timespan]::TryParse($t, [ref]$ts)) { return $null }
+    if ($ts -le [timespan]::Zero) { return $null }
+    return $ts
+}
+
+# Ziel eines CNAME/MX vervollständigen: ohne Punkt = in dieser Zone, mit Punkt = vollständiger Name
+function Resolve-DnsZielName([string]$Ziel, [string]$Zone) {
+    $zoneNorm = $Zone.TrimEnd('.').ToLower()
+    $z = $Ziel.Trim().ToLower()
+    if ($z -eq '@') { return "$zoneNorm." }
+    if ($z.Contains('.')) { return $z.TrimEnd('.') + '.' }
+    return "$z.$zoneNorm."
+}
+
+# Vergleichs- und Protokolltext "<Typ>|<Daten>" (MX: "MX|<Ziel>|<Priorität>"), normalisiert
+function Get-DnsBezug([string]$Typ, [string]$Daten, [string]$Prioritaet = '') {
+    $t = $Typ.ToUpper()
+    $d = "$Daten".Trim()
+    if ($t -eq 'A' -or $t -eq 'AAAA') {
+        $adr = $null
+        if ([System.Net.IPAddress]::TryParse($d, [ref]$adr)) { $d = $adr.ToString() }
+    }
+    elseif ($t -in 'CNAME', 'MX', 'PTR', 'NS') {
+        $d = $d.ToLower()
+        if ($d -and -not $d.EndsWith('.')) { $d += '.' }
+    }
+    if ($t -eq 'MX') {
+        $p = 0
+        [void][int]::TryParse("$Prioritaet", [ref]$p)
+        return "MX|$d|$p"
+    }
+    return "$t|$d"
+}
+
+function ConvertFrom-DnsBezug([string]$Bezug) {
+    $teile = @("$Bezug" -split '\|')
+    $daten = ''
+    $prio  = ''
+    if ($teile.Count -gt 1) { $daten = $teile[1] }
+    if ($teile.Count -gt 2) { $prio  = $teile[2] }
+    return [pscustomobject]@{ Typ = $teile[0]; Daten = $daten; Prioritaet = $prio }
+}
+
+# DNS-Eintrag vom Server (Get-DnsServerResourceRecord) -> Typ/Name/Daten/Prioritaet
+function ConvertFrom-DnsRecord($Record) {
+    $d     = $Record.RecordData
+    $typ   = "$($Record.RecordType)".ToUpper()
+    $daten = ''
+    $prio  = ''
+    switch ($typ) {
+        'A'     { $daten = "$($d.IPv4Address)" }
+        'AAAA'  { $daten = "$($d.IPv6Address)" }
+        'CNAME' { $daten = "$($d.HostNameAlias)" }
+        'MX'    { $daten = "$($d.MailExchange)"; $prio = "$($d.Preference)" }
+        'PTR'   { $daten = "$($d.PtrDomainName)" }
+        'NS'    { $daten = "$($d.NameServer)" }
+    }
+    return [pscustomobject]@{ Typ = $typ; Name = "$($Record.HostName)"; Daten = $daten; Prioritaet = $prio }
+}
+
+function Get-DnsBezugAusRecord($Record) {
+    $r = ConvertFrom-DnsRecord $Record
+    return (Get-DnsBezug $r.Typ $r.Daten $r.Prioritaet)
+}
+
+# Neuer Eintrag gegen vorhandene Einträge mit gleichem Namen prüfen.
+# Art: Neu | Vorhanden (exakt gleich) | Anders (gleicher Typ, anderer Wert) | Fehler (CNAME-Regel)
+function Get-DnsKonflikt($Neu, [object[]]$Vorhandene) {
+    $vorh     = @($Vorhandene | Where-Object { $_ })
+    $schluessel = Get-DnsBezug $Neu.Typ $Neu.Daten $Neu.Prioritaet
+    $ergebnis = [pscustomobject]@{ Art = 'Neu'; Grund = ''; Werte = '' }
+    if (@($vorh | Where-Object { (Get-DnsBezug $_.Typ $_.Daten $_.Prioritaet) -eq $schluessel }).Count) {
+        $ergebnis.Art = 'Vorhanden'
+        return $ergebnis
+    }
+    $cnames = @($vorh | Where-Object { $_.Typ -eq 'CNAME' })
+    $andere = @($vorh | Where-Object { $_.Typ -notin 'SOA', 'NS' })
+    if ($Neu.Typ -eq 'CNAME') {
+        if ($cnames.Count) {
+            $ergebnis.Art = 'Fehler'; $ergebnis.Grund = "Name hat schon einen CNAME auf $($cnames[0].Daten)"
+        }
+        elseif ($andere.Count) {
+            $typen = (@($andere | ForEach-Object { $_.Typ } | Select-Object -Unique) -join ', ')
+            $ergebnis.Art = 'Fehler'; $ergebnis.Grund = "Name hat schon andere Einträge ($typen) - ein CNAME darf nicht neben anderen Einträgen stehen"
+        }
+        return $ergebnis
+    }
+    if ($cnames.Count) {
+        $ergebnis.Art = 'Fehler'; $ergebnis.Grund = "Name ist ein CNAME auf $($cnames[0].Daten) - keine weiteren Einträge möglich"
+        return $ergebnis
+    }
+    $gleicherTyp = @($vorh | Where-Object { $_.Typ -eq $Neu.Typ })
+    if ($gleicherTyp.Count) {
+        $ergebnis.Art   = 'Anders'
+        $ergebnis.Werte = (@($gleicherTyp | ForEach-Object { if ($_.Prioritaet) { "$($_.Prioritaet) $($_.Daten)" } else { $_.Daten } }) -join ', ')
+    }
+    return $ergebnis
+}
+
+# Einen Teil der Schnelleingabe auswerten (name=wert)
+function ConvertFrom-DnsSchnellTeil([string]$Teil, [string]$Zone) {
+    $e = [pscustomobject]@{ Eingabe = $Teil; Typ = ''; Name = ''; Daten = ''; Prioritaet = ''; Fehler = ''; Hinweis = '' }
+    $zoneNorm = $Zone.TrimEnd('.').ToLower()
+    $pos = $Teil.IndexOf('=')
+    if ($pos -lt 1) { $e.Fehler = 'Format: name=wert (z.B. srv01=192.168.10.5)'; return $e }
+    $name = $Teil.Substring(0, $pos).Trim()
+    $wert = $Teil.Substring($pos + 1).Trim()
+
+    # Name: @ = Zonenstamm, vollständige Namen der Zone werden gekürzt
+    if ($name -ne '@') {
+        $nl = $name.TrimEnd('.').ToLower()
+        if ($nl -eq $zoneNorm) { $name = '@' }
+        elseif ($zoneNorm -and $nl.EndsWith(".$zoneNorm")) { $name = $name.TrimEnd('.').Substring(0, $nl.Length - $zoneNorm.Length - 1) }
+        elseif ($name.EndsWith('.')) { $e.Fehler = "'$name' gehört nicht zur Zone $Zone"; return $e }
+    }
+    if ($name -ne '@') {
+        $fehler = Get-DnsHostnameFehler $name
+        if ($fehler) { $e.Fehler = $fehler; return $e }
+        $name = $name.ToLower()
+    }
+    $e.Name = $name
+    if (-not $wert) { $e.Fehler = 'Wert fehlt'; return $e }
+
+    if ($wert -match '^MX:') {
+        $mx   = @($wert.Substring(3) -split ':')
+        $ziel = $mx[0].Trim()
+        $prio = ''
+        if ($mx.Count -gt 1) { $prio = $mx[1].Trim() }
+        if (-not $ziel) { $e.Fehler = 'MX: Ziel fehlt (Format @=MX:mail:10)'; return $e }
+        if ($ziel -ne '@') {
+            $fehler = Get-DnsHostnameFehler $ziel
+            if ($fehler) { $e.Fehler = "MX-Ziel: $fehler"; return $e }
+        }
+        if (-not $prio) { $prio = '10'; $e.Hinweis = 'Priorität fehlt - 10 angenommen' }
+        elseif ($prio -notmatch '^\d{1,5}$' -or [int]$prio -gt 65535) { $e.Fehler = "MX-Priorität '$prio' muss eine Zahl von 0 bis 65535 sein"; return $e }
+        $e.Typ        = 'MX'
+        $e.Daten      = Resolve-DnsZielName $ziel $Zone
+        $e.Prioritaet = [string][int]$prio
+        return $e
+    }
+
+    $art = Get-IpArt $wert
+    if ($art -eq 'IPv4') { $e.Typ = 'A';    $e.Daten = $wert; return $e }
+    if ($art -eq 'IPv6') { $e.Typ = 'AAAA'; $e.Daten = ([System.Net.IPAddress]::Parse($wert)).ToString(); return $e }
+    if ($wert -match '^[\d.]+$') { $e.Fehler = "'$wert' ist keine gültige IPv4-Adresse"; return $e }
+    if ($wert.Contains(':'))     { $e.Fehler = "'$wert' ist keine gültige IPv6-Adresse"; return $e }
+
+    # sonst: CNAME auf einen Hostnamen
+    if ($name -eq '@') { $e.Fehler = 'CNAME am Zonenstamm (@) ist nicht erlaubt'; return $e }
+    $fehler = Get-DnsHostnameFehler $wert
+    if ($fehler) { $e.Fehler = "Ziel: $fehler"; return $e }
+    $e.Typ   = 'CNAME'
+    $e.Daten = Resolve-DnsZielName $wert $Zone
+    if ($e.Daten -eq "$name.$zoneNorm.") { $e.Typ = ''; $e.Daten = ''; $e.Fehler = 'CNAME zeigt auf sich selbst'; return $e }
+    return $e
+}
+
+# Schnelleingabe "srv01=192.168.10.5, www=srv01; @=MX:mail:10" -> ein Objekt je Teil
+# (Typ/Name/Daten/Prioritaet/Fehler/Hinweis). Ungültige Teile haben Fehler gesetzt.
+function ConvertFrom-DnsSchnelleingabe([string]$Text, [string]$Zone) {
+    $liste = [System.Collections.Generic.List[object]]::new()
+    foreach ($teil in ("$Text" -split '[,;]')) {
+        $roh = $teil.Trim()
+        if ($roh) { $liste.Add((ConvertFrom-DnsSchnellTeil $roh $Zone)) }
+    }
+    return $liste.ToArray()
+}
+
+# Netz "192.168.10.0/24", "192.168.10" oder "10.0.0.0/8" -> Reverse-Zone (nur /8, /16, /24)
+function ConvertTo-ReverseZonenName([string]$Netz) {
+    $e = [pscustomobject]@{ Eingabe = $Netz; Zone = ''; NetworkId = ''; Praefix = 0; Fehler = '' }
+    $t = "$Netz".Trim()
+    if ($t.Contains(':')) { $e.Fehler = 'Nur IPv4-Netze (192.168.10.0/24, 172.16.0.0/16, 10.0.0.0/8)'; return $e }
+    if ($t -notmatch '^(\d{1,3}(?:\.\d{1,3}){0,3})(?:/(\d{1,2}))?$') { $e.Fehler = 'Format: 192.168.10.0/24, 192.168.10 oder 10.0.0.0/8'; return $e }
+    $teilText = $Matches[1]
+    $praefixText = $Matches[2]
+    $oktette = @($teilText -split '\.' | ForEach-Object { [int]$_ })
+    if (@($oktette | Where-Object { $_ -gt 255 }).Count) { $e.Fehler = "'$t': eine Zahl ist größer als 255"; return $e }
+    if ($praefixText) { $praefix = [int]$praefixText } else { $praefix = [Math]::Min(3, $oktette.Count) * 8 }
+    if ($praefix -notin 8, 16, 24) { $e.Fehler = "Präfix /$praefix geht nicht - nur /8, /16 oder /24 (klassenlose Reverse-Zonen sind nicht enthalten)"; return $e }
+    $anzahl = [int]($praefix / 8)
+    if ($oktette.Count -lt $anzahl) { $e.Fehler = "Für /$praefix braucht es mindestens $anzahl Zahlen vor dem /"; return $e }
+    $voll  = @(0, 0, 0, 0)
+    $rueck = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $anzahl; $i++) { $voll[$i] = [int]$oktette[$i] }
+    for ($i = $anzahl - 1; $i -ge 0; $i--) { $rueck.Add([string]$oktette[$i]) }
+    $e.Praefix   = $praefix
+    $e.NetworkId = '{0}.{1}.{2}.{3}/{4}' -f $voll[0], $voll[1], $voll[2], $voll[3], $praefix
+    $e.Zone      = ($rueck.ToArray() -join '.') + '.in-addr.arpa'
+    return $e
+}
+
+# Vollständiger Reverse-Name einer IP: 192.168.10.5 -> 5.10.168.192.in-addr.arpa (IPv6: ip6.arpa)
+function Get-ReverseName([string]$Ip) {
+    $art = Get-IpArt $Ip
+    if (-not $art) { return '' }
+    $bytes = ([System.Net.IPAddress]::Parse($Ip.Trim())).GetAddressBytes()
+    if ($art -eq 'IPv4') { return ('{0}.{1}.{2}.{3}.in-addr.arpa' -f $bytes[3], $bytes[2], $bytes[1], $bytes[0]) }
+    $nibbles = (-join ($bytes | ForEach-Object { '{0:x2}' -f $_ })).ToCharArray()
+    [array]::Reverse($nibbles)
+    return (($nibbles -join '.') + '.ip6.arpa')
+}
+
+# Passende (längste) Reverse-Zone für eine IP finden. Ohne Treffer bei IPv4: Vorschlag /24
+function Get-PtrZielFuerIp([string]$Ip, [string[]]$ReverseZonen) {
+    $ergebnis = [pscustomobject]@{ Ip = $Ip; Zone = ''; Name = ''; VollName = ''; VorschlagNetz = ''; VorschlagZone = ''; Fehler = '' }
+    $voll = Get-ReverseName $Ip
+    if (-not $voll) { $ergebnis.Fehler = "'$Ip' ist keine gültige IP-Adresse"; return $ergebnis }
+    $ergebnis.VollName = $voll
+    $beste = @($ReverseZonen | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('.').ToLower() } |
+               Where-Object { $voll -eq $_ -or $voll.EndsWith(".$_") } | Sort-Object Length -Descending) | Select-Object -First 1
+    if ($beste) {
+        $ergebnis.Zone = $beste
+        $ergebnis.Name = if ($voll -eq $beste) { '@' } else { $voll.Substring(0, $voll.Length - $beste.Length - 1) }
+    }
+    elseif ((Get-IpArt $Ip) -eq 'IPv4') {
+        $o = $Ip.Trim().Split('.')
+        $ergebnis.VorschlagNetz = "$($o[0]).$($o[1]).$($o[2]).0/24"
+        $ergebnis.VorschlagZone = "$($o[2]).$($o[1]).$($o[0]).in-addr.arpa"
+    }
+    return $ergebnis
+}
+
+# Erkennt die Meldung "Quelldateien nicht gefunden" von Install-WindowsFeature (offline / Feature entfernt)
+function Test-QuelleFehlt([string]$Meldung) {
+    return ($Meldung -match '0x800f081f|0x800f0906|0x800f0907|0x800f0950|source files could not be (found|downloaded)|Quelldateien')
+}
+#endregion
+
+#region ======================= DNS-SERVER ==========================
+
+# Parameter für alle *-DnsServer*-Aufrufe (leer = dieser Server)
+function Get-DnsParameter {
+    if ($DnsServerName) { return @{ ComputerName = $DnsServerName } }
+    return @{}
+}
+
+function Get-DnsServerAnzeige {
+    if ($DnsServerName) { return $DnsServerName }
+    return "$env:COMPUTERNAME (lokal)"
+}
+
+# Primäre Zonen des Servers (ohne automatisch erzeugte und TrustAnchors)
+function Get-DnsZonen([switch]$Forward, [switch]$Reverse) {
+    $dns = Get-DnsParameter
+    $zonen = @(Get-DnsServerZone @dns -ErrorAction Stop |
+               Where-Object { -not $_.IsAutoCreated -and $_.ZoneName -ne 'TrustAnchors' -and "$($_.ZoneType)" -eq 'Primary' })
+    if ($Forward) { $zonen = @($zonen | Where-Object { -not $_.IsReverseLookupZone }) }
+    if ($Reverse) { $zonen = @($zonen | Where-Object { $_.IsReverseLookupZone }) }
+    return @($zonen | Sort-Object ZoneName)
+}
+
+function Select-DnsZone([string]$Titel, [object[]]$Zonen) {
+    if (-not $Zonen -or $Zonen.Count -eq 0) { Write-Warnung 'Keine passende Zone vorhanden - zuerst unter [3] bzw. [4] anlegen.'; Stop-Aktion }
+    $eintraege = @($Zonen | ForEach-Object {
+        $art = if ($_.IsDsIntegrated) { 'AD-integriert' } else { 'Datei' }
+        [pscustomobject]@{ Anzeige = '{0,-40} {1}' -f $_.ZoneName, $art; Zone = $_.ZoneName }
+    })
+    $wahl = @(Select-AusListe -Eintraege $eintraege -Titel $Titel)
+    if ($wahl.Count -eq 0) { Stop-Aktion }
+    Write-Ok "Zone: $($wahl[0].Zone)"
+    return $wahl[0].Zone
+}
+
+# Ist der DNS-Server ein Domänencontroller? Nur dann sind AD-integrierte Zonen möglich
+function Test-DnsServerIstDc {
+    if (-not $script:Faehig.AD) { return $false }
+    if (-not $script:Faehig.DnsEntfernt) {
+        try   { return ((Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).DomainRole -ge 4) }
+        catch { return $false }
+    }
+    try   { $null = Get-ADDomainController -Identity $DnsServerName -ErrorAction Stop; return $true }
+    catch { return $false }
+}
+
+# Fragt AD-Integration und dynamische Updates für neue Zonen ab
+function Read-DnsZonenOptionen {
+    $ad = $false
+    if (Test-DnsServerIstDc) { $ad = Read-JaNein "AD-integriert anlegen (Replikation: $DnsReplikation)?" $true }
+    else { Write-Info 'DNS-Server ist kein Domänencontroller - Zonen werden als Datei angelegt (<name>.dns).' }
+    $vorschlag = if ($ad) { 'Secure' } else { 'None' }
+    $erlaubt   = 'Secure', 'NonsecureAndSecure', 'None'
+    while ($true) {
+        $antwort = Read-Text 'Dynamische Updates (Secure / NonsecureAndSecure / None)' $vorschlag
+        $dyn = @($erlaubt | Where-Object { $_ -eq $antwort }) | Select-Object -First 1
+        if ($dyn) { break }
+        Write-Warnung 'Bitte Secure, NonsecureAndSecure oder None eingeben.'
+    }
+    if ($dyn -eq 'Secure' -and -not $ad) { Write-Warnung 'Secure geht nur bei AD-integrierten Zonen - nehme None.'; $dyn = 'None' }
+    return [pscustomobject]@{ AdIntegriert = $ad; DynamicUpdate = $dyn }
+}
+
+# Zone anlegen (vorhanden -> VORHANDEN). $NetworkId gesetzt = Reverse-Zone
+function New-DnsZone {
+    param([string]$Zone, [string]$NetworkId = '', $Optionen)
+    $dns      = Get-DnsParameter
+    $richtung = if ($NetworkId) { 'Reverse' } else { 'Forward' }
+    if (Get-DnsServerZone -Name $Zone @dns -ErrorAction SilentlyContinue) { Add-Ergebnis 'DNS-Zone' $Zone $Zone 'VORHANDEN' $richtung; return $true }
+    $param = @{ DynamicUpdate = $Optionen.DynamicUpdate; ErrorAction = 'Stop' }
+    if ($NetworkId) { $param.NetworkId = $NetworkId } else { $param.Name = $Zone }
+    if ($Optionen.AdIntegriert) { $param.ReplicationScope = $DnsReplikation } else { $param.ZoneFile = "$Zone.dns" }
+    $art = if ($Optionen.AdIntegriert) { "AD-integriert ($DnsReplikation)" } else { "Datei $Zone.dns" }
+    try {
+        Add-DnsServerPrimaryZone @param @dns
+        Add-Ergebnis 'DNS-Zone' $Zone $Zone 'OK' "$richtung, $art, Updates: $($Optionen.DynamicUpdate)" -Bezug $richtung
+        return $true
+    }
+    catch {
+        Add-Ergebnis 'DNS-Zone' $Zone $Zone 'FEHLER' $_.Exception.Message
+        return $false
+    }
+}
+
+# Vorhandene Einträge mit genau diesem Namen (als Typ/Daten-Objekte)
+function Get-DnsVorhandene([string]$Zone, [string]$Name) {
+    $dns = Get-DnsParameter
+    return @(Get-DnsServerResourceRecord -ZoneName $Zone -Name $Name @dns -ErrorAction SilentlyContinue |
+               Where-Object { "$($_.HostName)" -eq $Name } | ForEach-Object { ConvertFrom-DnsRecord $_ })
+}
+
+# Plan für einen Eintrag: Konflikte prüfen, bei anderem Wert nachfragen
+function New-DnsEintragPlan([string]$Zone, [string]$Typ, [string]$Name, [string]$Daten, [string]$Prioritaet = '') {
+    $plan = [pscustomobject]@{ Zone = $Zone; Typ = $Typ; Name = $Name; Daten = $Daten; Prioritaet = $Prioritaet; Art = 'Neu'; Grund = '' }
+    $k = Get-DnsKonflikt $plan (Get-DnsVorhandene $Zone $Name)
+    $plan.Art   = $k.Art
+    $plan.Grund = $k.Grund
+    if ($k.Art -eq 'Anders') {
+        $anzeige = if ($Name -eq '@') { $Zone } else { "$Name.$Zone" }
+        if ($Typ -eq 'PTR') {
+            $plan.Art = 'Uebersprungen'; $plan.Grund = "PTR zeigt schon auf $($k.Werte)"
+        }
+        else {
+            Write-Warnung "$anzeige hat schon $Typ = $($k.Werte)"
+            if (Read-JaNein "Zusätzlich $Typ = $Daten anlegen?" $false) { $plan.Art = 'Neu' }
+            else { $plan.Art = 'Uebersprungen'; $plan.Grund = "anderer Wert vorhanden ($($k.Werte)), nicht zusätzlich angelegt" }
+        }
+    }
+    return $plan
+}
+
+function Write-DnsPlanZeile($Plan) {
+    $wert = if ($Plan.Typ -eq 'MX') { "$($Plan.Prioritaet) $($Plan.Daten)" } else { $Plan.Daten }
+    $text = '    {0,-6} {1,-24} -> {2,-32} {3}' -f $Plan.Typ, $Plan.Name, $wert, $Plan.Zone
+    switch ($Plan.Art) {
+        'Neu'           { Write-Host $text -ForegroundColor White }
+        'Vorhanden'     { Write-Host "$text   (vorhanden)" -ForegroundColor Yellow }
+        'Uebersprungen' { Write-Host "$text   (übersprungen: $($Plan.Grund))" -ForegroundColor DarkYellow }
+        default         { Write-Host "$text   (FEHLER: $($Plan.Grund))" -ForegroundColor Red }
+    }
+}
+
+# Plan ausführen und protokollieren: Name = Hostname, DN = Zone, Bezug = <Typ>|<Daten>
+function Invoke-DnsEintragPlan($Plan, $Ttl) {
+    $bezug = Get-DnsBezug $Plan.Typ $Plan.Daten $Plan.Prioritaet
+    $info  = "$($Plan.Typ) $($Plan.Daten)"
+    switch ($Plan.Art) {
+        'Vorhanden'     { Add-Ergebnis 'DNS-Eintrag' $Plan.Name $Plan.Zone 'VORHANDEN' $info; return }
+        'Uebersprungen' { Add-Ergebnis 'DNS-Eintrag' $Plan.Name $Plan.Zone 'UEBERSPRUNGEN' $Plan.Grund; return }
+        'Fehler'        { Add-Ergebnis 'DNS-Eintrag' $Plan.Name $Plan.Zone 'FEHLER' $Plan.Grund; return }
+    }
+    $dns   = Get-DnsParameter
+    $param = @{ ZoneName = $Plan.Zone; Name = $Plan.Name; ErrorAction = 'Stop' }
+    if ($Ttl) { $param.TimeToLive = $Ttl }
+    try {
+        switch ($Plan.Typ) {
+            'A'     { Add-DnsServerResourceRecordA     @param @dns -IPv4Address $Plan.Daten }
+            'AAAA'  { Add-DnsServerResourceRecordAAAA  @param @dns -IPv6Address $Plan.Daten }
+            'CNAME' { Add-DnsServerResourceRecordCName @param @dns -HostNameAlias $Plan.Daten }
+            'MX'    { Add-DnsServerResourceRecordMX    @param @dns -MailExchange $Plan.Daten -Preference ([uint16]$Plan.Prioritaet) }
+            'PTR'   { Add-DnsServerResourceRecordPtr   @param @dns -PtrDomainName $Plan.Daten }
+        }
+        Add-Ergebnis 'DNS-Eintrag' $Plan.Name $Plan.Zone 'OK' $info -Bezug $bezug
+    }
+    catch { Add-Ergebnis 'DNS-Eintrag' $Plan.Name $Plan.Zone 'FEHLER' $_.Exception.Message }
+}
+
+function Read-DnsTtl {
+    while ($true) {
+        $text = Read-Text 'TTL (hh:mm:ss)' $DnsStandardTTL -Pflicht
+        $ttl  = ConvertTo-DnsTtl $text
+        if ($ttl) { return $ttl }
+        Write-Warnung 'Bitte im Format hh:mm:ss eingeben, z.B. 01:00:00.'
+    }
+}
+#endregion
+
+#region ======================= MODUL [D] DNS ========================
+
+function Get-DnsMenue {
+    $f = $script:Faehig
+    return @(
+        [pscustomobject]@{ Taste = '1'; Text = 'Status: Rolle, Dienst, Zonen';                    An = $true;                                                              Braucht = @();                 Aktion = { Show-DnsStatus } }
+        [pscustomobject]@{ Taste = '2'; Text = 'DNS-Rolle installieren';                          An = ($Funktionen.DnsRolle -and -not $f.DnsRolle -and -not $f.DnsEntfernt); Braucht = @('ServerManager'); Aktion = { Install-DnsRolle } }
+        [pscustomobject]@{ Taste = '3'; Text = 'Forward-Zone(n) erstellen';                       An = $Funktionen.DnsZonen;                                               Braucht = @('DNS');            Aktion = { Start-DnsForwardZonen } }
+        [pscustomobject]@{ Taste = '4'; Text = 'Reverse-Zone(n) erstellen (Netz /8, /16, /24)';   An = $Funktionen.DnsZonen;                                               Braucht = @('DNS');            Aktion = { Start-DnsReverseZonen } }
+        [pscustomobject]@{ Taste = '5'; Text = 'Einträge erstellen (Schnelleingabe, A/AAAA/CNAME/MX + PTR)'; An = $Funktionen.DnsEintraege;                                Braucht = @('DNS');            Aktion = { Start-DnsEintraege } }
+        [pscustomobject]@{ Taste = '6'; Text = 'Fehlende PTR-Einträge auffüllen';                 An = $Funktionen.DnsPTRAuffuellen;                                       Braucht = @('DNS');            Aktion = { Start-DnsPtrAuffuellen } }
+        [pscustomobject]@{ Taste = '7'; Text = 'Weiterleitungen (Forwarder)';                     An = $Funktionen.DnsWeiterleitung;                                       Braucht = @('DNS');            Aktion = { Start-DnsWeiterleitungen } }
+        [pscustomobject]@{ Taste = '8'; Text = 'Namensauflösung testen';                          An = $Funktionen.DnsTest;                                                Braucht = @('DNS', 'DnsClient'); Aktion = { Start-DnsTest } }
+    )
+}
+
+function Start-DnsMenue {
+    while ($true) {
+        $sichtbar = @()
+        $gruende  = @()
+        foreach ($m in @(Get-DnsMenue | Where-Object { $_.An })) {
+            $grund = Get-FehlendeFaehigkeit $m.Braucht $script:Faehig
+            if (-not $grund) { $sichtbar += $m }
+            elseif ($gruende -notcontains $grund) { $gruende += $grund }
+        }
+        Write-Titel "DNS   Server: $(Get-DnsServerAnzeige)"
+        foreach ($m in $sichtbar) { Write-Host ('  [{0}] {1}' -f $m.Taste, $m.Text) }
+        Write-Host '  [0] Zurück zum Hauptmenü'
+        if ($gruende.Count) { Write-Host "  Weitere Punkte ausgeblendet: $($gruende -join ' / ')" -ForegroundColor DarkGray }
+        $wahl = "$(Read-Host '  Auswahl')".Trim().ToUpper()
+        if (-not $wahl -or $wahl -eq '0') { return }
+        $punkt = @($sichtbar | Where-Object { $_.Taste -eq $wahl }) | Select-Object -First 1
+        if (-not $punkt) { Write-Warnung 'Ungültige Auswahl.'; continue }
+        try { & $punkt.Aktion }
+        catch [System.OperationCanceledException] { Write-Warnung 'Abgebrochen - zurück zum DNS-Menü.' }
+        catch { Write-Host "  FEHLER: $($_.Exception.Message)" -ForegroundColor Red }
+    }
+}
+
+# [D][1]
+function Show-DnsStatus {
+    Write-Titel 'DNS - Status'
+    $f = $script:Faehig
+    Write-Info "DNS-Server:        $(Get-DnsServerAnzeige)"
+    if (-not $f.DnsEntfernt) {
+        Write-Info "Rolle installiert: $(if ($f.DnsRolle) { 'ja' } else { 'nein' })"
+        Write-Info "Dienst läuft:      $(if ($f.DnsDienst) { 'ja' } else { 'nein' })"
+    }
+    if (-not $f.DNS) { Write-Warnung $f.Grund.DNS; return }
+    $dns = Get-DnsParameter
+    $zonen = @(Get-DnsServerZone @dns -ErrorAction Stop | Where-Object { -not $_.IsAutoCreated -and $_.ZoneName -ne 'TrustAnchors' } | Sort-Object IsReverseLookupZone, ZoneName)
+    if ($zonen.Count -eq 0) { Write-Info 'Noch keine Zonen vorhanden.' }
+    else {
+        $zonen | ForEach-Object {
+            $anzahl = @(Get-DnsServerResourceRecord -ZoneName $_.ZoneName @dns -ErrorAction SilentlyContinue).Count
+            [pscustomobject]@{
+                Name           = $_.ZoneName
+                Typ            = "$($_.ZoneType)"
+                Richtung       = if ($_.IsReverseLookupZone) { 'Reverse' } else { 'Forward' }
+                'AD-integriert' = if ($_.IsDsIntegrated) { 'ja' } else { 'nein' }
+                Eintraege      = $anzahl
+            }
+        } | Format-Table -AutoSize | Out-Host
+    }
+    try {
+        $fw = @((Get-DnsServerForwarder @dns -ErrorAction Stop).IPAddress | ForEach-Object { "$_" })
+        Write-Info ('Weiterleitungen:   ' + $(if ($fw.Count) { $fw -join ', ' } else { 'keine' }))
+    }
+    catch { }
+}
+
+# [D][2]
+function Install-DnsRolle {
+    Write-Titel 'DNS-Rolle installieren'
+    if ($script:Faehig.DnsRolle) { Write-Ok 'Die DNS-Rolle ist bereits installiert.'; return }
+    if (-not $script:Faehig.Admin) { Write-Warnung 'Ohne Administratorrechte schlägt die Installation fehl.' }
+    Write-Info 'Wird installiert: Windows-Feature DNS mit Verwaltungstools (Install-WindowsFeature DNS -IncludeManagementTools)'
+    if ($Funktionen.Vorschau -and -not (Read-JaNein 'Jetzt installieren?' $true)) { Stop-Aktion }
+    $quelle = ''
+    while ($true) {
+        $param = @{ Name = 'DNS'; IncludeManagementTools = $true; ErrorAction = 'Stop' }
+        if ($quelle) { $param.Source = $quelle }
+        try {
+            Write-Info 'Installation läuft, das kann einige Minuten dauern ...'
+            $erg = Install-WindowsFeature @param
+            if (-not $erg.Success) { throw "Installation nicht erfolgreich (ExitCode $($erg.ExitCode))" }
+            Add-Ergebnis 'DNS-Rolle' 'DNS' $env:COMPUTERNAME 'OK' "ExitCode $($erg.ExitCode)"
+            if ("$($erg.RestartNeeded)" -eq 'Yes') { Write-Warnung 'Windows meldet: Neustart des Servers nötig.' }
+            break
+        }
+        catch {
+            $meldung = $_.Exception.Message
+            if (-not (Test-QuelleFehlt $meldung)) { Add-Ergebnis 'DNS-Rolle' 'DNS' $env:COMPUTERNAME 'FEHLER' $meldung; return }
+            Write-Warnung 'Die Installationsdateien wurden nicht gefunden (Server offline oder Feature-Dateien entfernt).'
+            Write-Info 'Lösung: Windows-Server-ISO einbinden und den Ordner \sources\sxs angeben, z.B. D:\sources\sxs'
+            Write-Info '(entspricht Install-WindowsFeature DNS -IncludeManagementTools -Source D:\sources\sxs)'
+            $quelle = (Read-Text 'Pfad zu \sources\sxs (Enter = abbrechen)').Trim('"')
+            if (-not $quelle) { Add-Ergebnis 'DNS-Rolle' 'DNS' $env:COMPUTERNAME 'FEHLER' 'Installationsdateien fehlen - mit -Source erneut versuchen'; return }
+            if (-not (Test-Path -LiteralPath $quelle -PathType Container)) { Write-Warnung "Ordner '$quelle' nicht gefunden."; $quelle = ''; continue }
+        }
+    }
+
+    # Fähigkeiten neu prüfen, damit das DNS-Menü sofort alle Punkte zeigt
+    $script:Faehig = Get-Faehigkeiten
+    if ($script:Faehig.DnsRolle -and -not $script:Faehig.DnsDienst -and (Read-JaNein 'DNS-Dienst läuft nicht. Jetzt starten?' $true)) {
+        try { Start-Service -Name DNS -ErrorAction Stop } catch { Write-Warnung "Dienst nicht gestartet: $($_.Exception.Message)" }
+        $script:Faehig = Get-Faehigkeiten
+    }
+    if ($script:Faehig.DNS) { Write-Ok 'DNS ist jetzt verfügbar - alle Punkte unter [D] stehen bereit.' }
+    else { Write-Warnung "DNS noch nicht nutzbar: $($script:Faehig.Grund.DNS)" }
+}
+
+# [D][3]
+function Start-DnsForwardZonen {
+    Write-Titel 'Forward-Zone(n) erstellen'
+    $namen   = @(Read-Namensliste 'Zonenname(n), z.B. firma.local')
+    $gueltig = @()
+    foreach ($n in $namen) {
+        $fehler = Get-DnsHostnameFehler $n
+        if ($fehler) { Write-Warnung "'$n': $fehler - übersprungen." } else { $gueltig += $n.TrimEnd('.').ToLower() }
+    }
+    if ($gueltig.Count -eq 0) { Stop-Aktion }
+    $optionen = Read-DnsZonenOptionen
+    if ($Funktionen.Vorschau) {
+        $art = if ($optionen.AdIntegriert) { "AD-integriert ($DnsReplikation)" } else { 'Datei' }
+        Write-Info "Wird erstellt ($art, dynamische Updates: $($optionen.DynamicUpdate)):"
+        foreach ($n in $gueltig) { Write-Host "    $n" -ForegroundColor White }
+        if (-not (Read-JaNein 'Jetzt erstellen?' $true)) { Stop-Aktion }
+    }
+    foreach ($n in $gueltig) { [void](New-DnsZone -Zone $n -Optionen $optionen) }
+}
+
+# [D][4]
+function Start-DnsReverseZonen {
+    Write-Titel 'Reverse-Zone(n) erstellen'
+    Write-Info 'Netz eingeben, z.B. 192.168.10.0/24, 192.168.10 oder 10.0.0.0/8 (nur /8, /16, /24)'
+    $eingabe = Read-Text 'Netz(e) - mehrere mit Komma (Enter = abbrechen)'
+    if (-not $eingabe) { Stop-Aktion }
+    $netze = @()
+    foreach ($teil in ($eingabe -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        $r = ConvertTo-ReverseZonenName $teil
+        if ($r.Fehler) { Write-Warnung "'$teil': $($r.Fehler) - übersprungen."; continue }
+        Write-Host ('    {0,-20} ->  {1}' -f $r.NetworkId, $r.Zone) -ForegroundColor White
+        $netze += $r
+    }
+    if ($netze.Count -eq 0) { Stop-Aktion }
+    $optionen = Read-DnsZonenOptionen
+    if ($Funktionen.Vorschau -and -not (Read-JaNein "$($netze.Count) Reverse-Zone(n) jetzt erstellen?" $true)) { Stop-Aktion }
+    foreach ($r in $netze) { [void](New-DnsZone -Zone $r.Zone -NetworkId $r.NetworkId -Optionen $optionen) }
+}
+
+# [D][5]
+function Start-DnsEintraege {
+    Write-Titel 'DNS-Einträge erstellen'
+    $zone = Select-DnsZone 'Forward-Zone für die Einträge wählen' (Get-DnsZonen -Forward)
+    Write-Info 'Schnelleingabe, mehrere mit , oder ; getrennt:'
+    Write-Info '  srv01=192.168.10.5     A (IPv6-Adresse = AAAA)'
+    Write-Info "  www=srv01               CNAME auf srv01.$zone (mit Punkt = vollständiger Name)"
+    Write-Info '  @=MX:mail:10            MX am Zonenstamm (@), Ziel mail, Priorität 10'
+    $teile   = @(ConvertFrom-DnsSchnelleingabe (Read-Text 'Einträge (Enter = abbrechen)') $zone)
+    foreach ($t in @($teile | Where-Object { $_.Fehler })) { Write-Warnung "'$($t.Eingabe)': $($t.Fehler) - übersprungen." }
+    foreach ($t in @($teile | Where-Object { $_.Hinweis })) { Write-Info "'$($t.Eingabe)': $($t.Hinweis)" }
+    $gueltig = @($teile | Where-Object { -not $_.Fehler })
+    if ($gueltig.Count -eq 0) { Stop-Aktion }
+    $ttl = Read-DnsTtl
+
+    # Pläne inkl. Konfliktprüfung
+    $plaene = [System.Collections.Generic.List[object]]::new()
+    foreach ($t in $gueltig) { $plaene.Add((New-DnsEintragPlan $zone $t.Typ $t.Name $t.Daten $t.Prioritaet)) }
+
+    # Automatischer PTR für A/AAAA
+    $neueZonen = [System.Collections.Generic.List[object]]::new()
+    if ($DnsAutoPTR) {
+        $reverse = @(Get-DnsZonen -Reverse | ForEach-Object { $_.ZoneName })
+        $ohne    = [System.Collections.Generic.List[string]]::new()
+        foreach ($p in @($plaene.ToArray() | Where-Object { $_.Typ -in 'A', 'AAAA' -and $_.Art -in 'Neu', 'Vorhanden' })) {
+            $ziel = Get-PtrZielFuerIp $p.Daten ($reverse + @($neueZonen | ForEach-Object { $_.Zone }))
+            if (-not $ziel.Zone -and $ziel.VorschlagNetz) {
+                $vorschlag = $ziel.VorschlagNetz
+                while ($true) {
+                    $antwort = Read-Text "Keine Reverse-Zone für $($p.Daten). Netz für neue Reverse-Zone ('-' = ohne PTR)" $vorschlag
+                    if ($antwort -eq '-') { break }
+                    $r = ConvertTo-ReverseZonenName $antwort
+                    if ($r.Fehler) { Write-Warnung $r.Fehler; continue }
+                    if (-not (Get-PtrZielFuerIp $p.Daten @($r.Zone)).Zone) { Write-Warnung "$($p.Daten) liegt nicht in $($r.NetworkId)."; continue }
+                    $neueZonen.Add($r)
+                    break
+                }
+                $ziel = Get-PtrZielFuerIp $p.Daten ($reverse + @($neueZonen | ForEach-Object { $_.Zone }))
+            }
+            if (-not $ziel.Zone) { $ohne.Add($p.Daten); continue }
+            $fqdn = Resolve-DnsZielName $p.Name $zone
+            if ($neueZonen | Where-Object { $_.Zone -eq $ziel.Zone }) {
+                $plaene.Add([pscustomobject]@{ Zone = $ziel.Zone; Typ = 'PTR'; Name = $ziel.Name; Daten = $fqdn; Prioritaet = ''; Art = 'Neu'; Grund = '' })
+            }
+            else { $plaene.Add((New-DnsEintragPlan $ziel.Zone 'PTR' $ziel.Name $fqdn)) }
+        }
+        if ($ohne.Count) { Write-Info "Ohne PTR (keine Reverse-Zone): $($ohne -join ', ')" }
+    }
+    $zonenOptionen = $null
+    if ($neueZonen.Count) { Write-Info 'Einstellungen für die neue(n) Reverse-Zone(n):'; $zonenOptionen = Read-DnsZonenOptionen }
+
+    if ($Funktionen.Vorschau) {
+        Write-Titel "Vorschau: $($plaene.Count) Eintrag/Einträge, TTL $ttl"
+        foreach ($r in $neueZonen) { Write-Host ('    Zone   {0}   (neu, Netz {1})' -f $r.Zone, $r.NetworkId) -ForegroundColor White }
+        foreach ($p in $plaene) { Write-DnsPlanZeile $p }
+        if (-not @($plaene | Where-Object { $_.Art -eq 'Neu' }).Count) { Write-Info 'Nichts Neues anzulegen.' }
+        if (-not (Read-JaNein 'Jetzt erstellen?' $true)) { Stop-Aktion }
+    }
+
+    Write-Titel 'Erstelle DNS-Einträge'
+    $fehlgeschlagen = @()
+    foreach ($r in $neueZonen) {
+        if (-not (New-DnsZone -Zone $r.Zone -NetworkId $r.NetworkId -Optionen $zonenOptionen)) { $fehlgeschlagen += $r.Zone }
+    }
+    foreach ($p in $plaene) {
+        if ($p.Typ -eq 'PTR' -and $fehlgeschlagen -contains $p.Zone) { $p.Art = 'Fehler'; $p.Grund = "Reverse-Zone $($p.Zone) konnte nicht angelegt werden" }
+        Invoke-DnsEintragPlan $p $ttl
+    }
+}
+
+# [D][6]
+function Start-DnsPtrAuffuellen {
+    Write-Titel 'Fehlende PTR-Einträge auffüllen'
+    $forward = @(Get-DnsZonen -Forward)
+    if ($forward.Count -eq 0) { Write-Warnung 'Keine Forward-Zone vorhanden.'; return }
+    $eintraege = @([pscustomobject]@{ Anzeige = '(alle Forward-Zonen)'; Zone = '*' }) +
+                 @($forward | ForEach-Object { [pscustomobject]@{ Anzeige = $_.ZoneName; Zone = $_.ZoneName } })
+    $wahl = @(Select-AusListe -Eintraege $eintraege -Titel 'Welche Forward-Zone(n) durchsuchen?')
+    if ($wahl.Count -eq 0) { Stop-Aktion }
+    $zonen = if ($wahl[0].Zone -eq '*') { @($forward | ForEach-Object { $_.ZoneName }) } else { @($wahl[0].Zone) }
+
+    $dns     = Get-DnsParameter
+    $reverse = @(Get-DnsZonen -Reverse | ForEach-Object { $_.ZoneName })
+    $plaene  = [System.Collections.Generic.List[object]]::new()
+    $ohne    = [System.Collections.Generic.List[string]]::new()
+    $gesehen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($zone in $zonen) {
+        $adressen = @('A', 'AAAA' | ForEach-Object { Get-DnsServerResourceRecord -ZoneName $zone -RRType $_ @dns -ErrorAction SilentlyContinue })
+        # echte Hostnamen zuerst, Zonenstamm und DomainDnsZones/ForestDnsZones zuletzt
+        $adressen = @($adressen | Sort-Object { if ("$($_.HostName)" -in '@', 'DomainDnsZones', 'ForestDnsZones') { 1 } else { 0 } }, HostName)
+        foreach ($rr in $adressen) {
+            $r    = ConvertFrom-DnsRecord $rr
+            $ziel = Get-PtrZielFuerIp $r.Daten $reverse
+            if (-not $ziel.Zone) { if ($gesehen.Add("ohne|$($r.Daten)")) { $ohne.Add("$($r.Daten) ($(Resolve-DnsZielName $r.Name $zone))") }; continue }
+            if (-not $gesehen.Add("$($ziel.Zone)|$($ziel.Name)")) { continue }
+            $ptr = @(Get-DnsServerResourceRecord -ZoneName $ziel.Zone -Name $ziel.Name -RRType Ptr @dns -ErrorAction SilentlyContinue |
+                     Where-Object { "$($_.HostName)" -eq $ziel.Name })
+            if ($ptr.Count) { continue }
+            $plaene.Add([pscustomobject]@{ Zone = $ziel.Zone; Typ = 'PTR'; Name = $ziel.Name; Daten = (Resolve-DnsZielName $r.Name $zone); Prioritaet = ''; Art = 'Neu'; Grund = '' })
+        }
+    }
+    if ($ohne.Count) {
+        Write-Warnung "Keine passende Reverse-Zone für $($ohne.Count) Adresse(n) - unter [4] anlegen:"
+        foreach ($o in $ohne) { Write-Info "  $o" }
+    }
+    if ($plaene.Count -eq 0) { Write-Ok 'Alle Adressen mit Reverse-Zone haben schon einen PTR-Eintrag.'; return }
+    Write-Info "Fehlende PTR-Einträge: $($plaene.Count)"
+    foreach ($p in $plaene) { Write-DnsPlanZeile $p }
+    if (-not (Read-JaNein 'Diese PTR-Einträge jetzt erstellen?' $true)) { Stop-Aktion }
+    $ttl = ConvertTo-DnsTtl $DnsStandardTTL
+    foreach ($p in $plaene) { Invoke-DnsEintragPlan $p $ttl }
+}
+
+# [D][7]
+function Start-DnsWeiterleitungen {
+    Write-Titel 'Weiterleitungen (Forwarder)'
+    $dns = Get-DnsParameter
+    $aktuell = @((Get-DnsServerForwarder @dns -ErrorAction Stop).IPAddress | Where-Object { $_ } | ForEach-Object { "$_" })
+    Write-Info ('Aktuell: ' + $(if ($aktuell.Count) { $aktuell -join ', ' } else { 'keine' }))
+    Write-Host '  [1] Ergänzen (vorhandene bleiben)'
+    Write-Host '  [2] Ersetzen (nur die neuen gelten)'
+    Write-Host '  [0] Zurück'
+    $modus = Read-Zahl 'Auswahl' 0 2
+    if ($modus -eq 0) { return }
+    $vorschlag = (@($DnsWeiterleitungen) -join ', ')
+    $liste = ConvertFrom-IpListe (Read-Text 'IP-Adresse(n) der Weiterleitungen, mit Komma' $vorschlag -Pflicht)
+    foreach ($u in $liste.Ungueltig) { Write-Warnung "'$u' ist keine gültige IP-Adresse - übersprungen." }
+    if ($liste.Gueltig.Count -eq 0) { Stop-Aktion }
+    if ($Funktionen.Vorschau) {
+        $neu = if ($modus -eq 1) { @($aktuell) + @($liste.Gueltig | Where-Object { $aktuell -notcontains $_ }) } else { $liste.Gueltig }
+        Write-Info "Danach: $($neu -join ', ')"
+        if (-not (Read-JaNein 'Jetzt übernehmen?' $true)) { Stop-Aktion }
+    }
+    $server = Get-DnsServerAnzeige
+    if ($modus -eq 1) {
+        foreach ($ip in $liste.Gueltig) {
+            if ($aktuell -contains $ip) { Add-Ergebnis 'DNS-Forwarder' $ip $server 'VORHANDEN'; continue }
+            try   { Add-DnsServerForwarder -IPAddress $ip @dns -ErrorAction Stop; Add-Ergebnis 'DNS-Forwarder' $ip $server 'OK' 'ergänzt' }
+            catch { Add-Ergebnis 'DNS-Forwarder' $ip $server 'FEHLER' $_.Exception.Message }
+        }
+    }
+    else {
+        $text = $liste.Gueltig -join ', '
+        try   { Set-DnsServerForwarder -IPAddress $liste.Gueltig @dns -ErrorAction Stop; Add-Ergebnis 'DNS-Forwarder' $text $server 'OK' "ersetzt, vorher: $(if ($aktuell.Count) { $aktuell -join ', ' } else { 'keine' })" }
+        catch { Add-Ergebnis 'DNS-Forwarder' $text $server 'FEHLER' $_.Exception.Message }
+    }
+}
+
+# [D][8]
+function Start-DnsTest {
+    Write-Titel 'Namensauflösung testen'
+    $server = if ($DnsServerName) { $DnsServerName } else { '127.0.0.1' }
+    Write-Info "Fragt nur den DNS-Server $server (Resolve-DnsName -DnsOnly). IP-Adresse = Rückwärtssuche (PTR)."
+    while ($true) {
+        $name = Read-Text 'Name oder IP-Adresse (Enter = zurück)'
+        if (-not $name) { return }
+        try {
+            $antwort = @(Resolve-DnsName -Name $name -Server $server -DnsOnly -ErrorAction Stop)
+            $antwort | ForEach-Object {
+                $daten = if ($_.IPAddress) { $_.IPAddress } elseif ($_.NameHost) { $_.NameHost } elseif ($_.NameExchange) { "$($_.Preference) $($_.NameExchange)" } elseif ($_.PrimaryServer) { "SOA $($_.PrimaryServer)" } else { '' }
+                [pscustomobject]@{ Name = $_.Name; Typ = "$($_.Type)"; TTL = $_.TTL; Bereich = "$($_.Section)"; Daten = $daten }
+            } | Format-Table -AutoSize | Out-Host
+        }
+        catch { Write-Warnung "Keine Antwort für '$name': $($_.Exception.Message)" }
     }
 }
 #endregion
@@ -1385,6 +2200,8 @@ function Get-Faehigkeiten {
         DnsDienst     = $false
         Smb           = Test-Befehl 'New-SmbShare'
         Gui           = Test-Befehl 'Out-GridView'
+        DnsClient     = Test-Befehl 'Resolve-DnsName'
+        DnsEntfernt   = $false
         Admin         = Test-Adminrechte
         ServerManager = Import-ModulStill 'ServerManager'
         Grund         = @{}
@@ -1402,7 +2219,7 @@ function Get-Faehigkeiten {
         catch { $f.Grund.AD = "AD - Domäne nicht erreichbar ($($_.Exception.Message))" }
     }
 
-    # DNS: Rolle (Windows-Feature), Dienst, Modul
+    # DNS: Rolle (Windows-Feature), Dienst, Modul - lokal
     if ($f.ServerManager) {
         try   { $f.DnsRolle = [bool](Get-WindowsFeature -Name DNS -ErrorAction Stop).Installed }
         catch { $f.DnsRolle = $false }
@@ -1410,10 +2227,21 @@ function Get-Faehigkeiten {
     $dienst = Get-Service -Name DNS -ErrorAction SilentlyContinue
     if ($dienst -and -not $f.ServerManager) { $f.DnsRolle = $true }   # ohne ServerManager: Dienst vorhanden = Rolle da
     $f.DnsDienst = [bool]($dienst -and "$($dienst.Status)" -eq 'Running')
-    if (-not $f.DnsRolle)                         { $f.Grund.DNS = 'DNS - Rolle nicht installiert' }
+
+    # Anderer DNS-Server ($DnsServerName): nur Modul + Erreichbarkeit zählen
+    $f.DnsEntfernt = [bool]($DnsServerName -and $DnsServerName -ne $env:COMPUTERNAME -and $DnsServerName -notlike "$env:COMPUTERNAME.*")
+    if ($f.DnsEntfernt) {
+        if (-not (Import-ModulStill 'DnsServer')) { $f.Grund.DNS = 'DNS - Modul DnsServer fehlt (Feature RSAT-DNS-Server)' }
+        else {
+            try   { $null = Get-DnsServerSetting -ComputerName $DnsServerName -ErrorAction Stop; $f.DNS = $true }
+            catch { $f.Grund.DNS = "DNS - Server $DnsServerName nicht erreichbar" }
+        }
+    }
+    elseif (-not $f.DnsRolle)                     { $f.Grund.DNS = 'DNS - Rolle nicht installiert' }
     elseif (-not $f.DnsDienst)                    { $f.Grund.DNS = 'DNS - Dienst läuft nicht' }
     elseif (-not (Import-ModulStill 'DnsServer')) { $f.Grund.DNS = 'DNS - Modul DnsServer fehlt' }
     else                                          { $f.DNS = $true }
+    if (-not $f.DnsClient) { $f.Grund.DnsClient = 'DNS - Resolve-DnsName fehlt (Modul DnsClient)' }
 
     if (-not $f.Smb) { $f.Grund.Smb = 'SMB - Modul SmbShare fehlt' }
     if (-not $f.Gui) { $f.Grund.Gui = 'Auswahlfenster (Out-GridView) nicht vorhanden' }
@@ -1460,7 +2288,8 @@ function Get-Hauptmenue {
         [pscustomobject]@{ Taste = '6'; Text = 'AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte';      An = $Funktionen.AGDLP;            Braucht = @('AD'); Aktion = { Start-AGDLP } }
         [pscustomobject]@{ Taste = '7'; Text = 'Abteilung komplett: OU + Unter-OUs + Gruppen + Benutzer';    An = $Funktionen.Abteilung;        Braucht = @('AD'); Aktion = { Start-Abteilung } }
         [pscustomobject]@{ Taste = '8'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
-        [pscustomobject]@{ Taste = '9'; Text = 'Rückgängig machen anhand des Protokolls';                    An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD'); Aktion = { Start-Rueckgaengig } }
+        [pscustomobject]@{ Taste = '9'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
+        [pscustomobject]@{ Taste = 'D'; Text = 'DNS: Zonen, Einträge, PTR, Weiterleitungen';                  An = $Funktionen.DNS;              Braucht = @();     Aktion = { Start-DnsMenue } }
         [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }
     )
 }
@@ -1469,7 +2298,7 @@ function Show-Startanzeige {
     $f = $script:Faehig
     Write-Titel "AD-Schnellanlage $ScriptVersion"
     if ($f.AD)  { Write-Ok "Active Directory: ja ($($Domain.DNSRoot))" } else { Write-Info "Active Directory: nein  ($($f.Grund.AD))" }
-    if ($f.DNS) { Write-Ok 'DNS-Server:       ja' }                        else { Write-Info "DNS-Server:       nein  ($($f.Grund.DNS))" }
+    if ($f.DNS) { Write-Ok "DNS-Server:       ja ($(Get-DnsServerAnzeige))" } else { Write-Info "DNS-Server:       nein  ($($f.Grund.DNS))" }
     $modus = if ($script:GuiVerfuegbar) { 'Auswahlfenster (Out-GridView)' }
              elseif (-not $f.Gui)       { 'Konsole (Out-GridView nicht vorhanden)' }
              else                       { 'Konsole (Auswahlfenster abgeschaltet)' }
