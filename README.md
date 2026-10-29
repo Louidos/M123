@@ -64,7 +64,7 @@ bei grüner CI.
 
 ## Projektstand
 
-Version **1.1.0** – DNS-Modul [D], Einstellungen [E], Start auch ohne Active Directory. Änderungen siehe [CHANGELOG.md](CHANGELOG.md).
+Version **2.0.0** – Subnetzrechner [S], fehlende Reverse-Zonen direkt beim PTR-Auffüllen anlegen, CSV-Import entfernt. Änderungen siehe [CHANGELOG.md](CHANGELOG.md).
 
 ## Lizenz
 

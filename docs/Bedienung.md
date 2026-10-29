@@ -5,7 +5,7 @@
 Beim Start zeigt das Script:
 
 ```
-  AD-Schnellanlage 1.1.0
+  AD-Schnellanlage 2.0.0
   Active Directory: ja (firma.local)
   DNS-Server:       nein  (DNS - Rolle nicht installiert)
   Auswahlmodus:     Auswahlfenster (Out-GridView)

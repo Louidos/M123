@@ -24,13 +24,16 @@
       [8] Rueckgaengig machen anhand des Protokolls (AD und DNS)
       [D] DNS: Status, Rolle installieren, Forward-/Reverse-Zonen, Eintraege per
           Schnelleingabe (srv01=192.168.10.5, www=srv01, @=MX:mail:10) mit
-          automatischem PTR, fehlende PTR auffuellen, Weiterleitungen, Namensaufloesung
+          automatischem PTR, fehlende PTR auffuellen (fehlende Reverse-Zonen dabei
+          gleich anlegen), Weiterleitungen, Namensaufloesung
+      [S] Subnetzrechner (IPv4): Maske, Netz, Broadcast, erster/letzter Host, Anzahl
+          Hosts - braucht weder AD noch DNS
       [E] Einstellungen: Praefixe, Namensmuster, Benutzer-Standards, DNS und Module
           ansehen, aendern und dauerhaft in Einstellungen.json speichern
       [P] Protokoll der Sitzung anzeigen
 
 .NOTES
-    Version: 1.1.0
+    Version: 2.0.0 (CSV-Import fuer Benutzer entfernt)
     Start:   powershell.exe -ExecutionPolicy Bypass -File .\AD-Schnellanlage.ps1
     AD-Funktionen brauchen einen Domaenencontroller oder das Windows-Feature
     "RSAT-AD-PowerShell". Ohne AD startet das Script trotzdem.
@@ -39,7 +42,7 @@
              dabei startet das Menue nicht.
 #>
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '2.0.0'
 
 #region ======================= KONFIGURATION =======================
 # Alles in diesem Block darf angepasst werden. Einfacher: Menüpunkt [E] Einstellungen -
