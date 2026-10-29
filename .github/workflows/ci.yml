@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Syntax und Pester (Windows PowerShell 5.1)
+    name: Syntax, PSScriptAnalyzer und Pester (Windows PowerShell 5.1)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +23,14 @@ jobs:
             Install-Module Pester -RequiredVersion 4.10.1 -Force -SkipPublisherCheck -Scope CurrentUser
           }
 
-      - name: Syntax prüfen und Tests ausführen
+      - name: PSScriptAnalyzer bereitstellen (nur CI, auf dem Server nicht nötig)
+        shell: powershell
+        run: |
+          if (-not (Get-Module PSScriptAnalyzer -ListAvailable)) {
+            Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Force -Scope CurrentUser
+          }
+          Get-Module PSScriptAnalyzer -ListAvailable | Select-Object Name, Version | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Syntax, Analyse und Tests ausführen
         shell: powershell
         run: ./scripts/Run-Tests.ps1

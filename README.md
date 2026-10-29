@@ -54,9 +54,11 @@ Ausführliche Bedienung: [docs/Bedienung.md](docs/Bedienung.md) · DNS: [docs/DN
 powershell.exe -ExecutionPolicy Bypass -File .\scripts\Run-Tests.ps1
 ```
 
-Prüft alle Scripts auf Syntaxfehler (Windows PowerShell 5.1) und führt die
-Pester-Tests in `tests/` aus (Pester 3.4 ist in Windows enthalten). Die CI macht
-dasselbe bei jedem Pull Request auf `windows-latest`.
+Prüft alle Scripts und Module (`.ps1`, `.psm1`, `.psd1`) auf Syntaxfehler (Windows PowerShell 5.1),
+analysiert `src/` mit PSScriptAnalyzer (nur wenn das Modul vorhanden ist, Regeln in
+`.github/PSScriptAnalyzerSettings.psd1`) und führt die Pester-Tests in `tests/` aus
+(Pester 3.4 ist in Windows enthalten). Die CI macht dasselbe bei jedem Pull Request auf
+`windows-latest` und installiert dort PSScriptAnalyzer – auf dem Server wird nichts installiert.
 
 Ablauf: pro Änderung ein Branch vom aktuellen `main`, Conventional Commits auf
 Deutsch, Eintrag in [CHANGELOG.md](CHANGELOG.md), Pull Request, Squash-Merge

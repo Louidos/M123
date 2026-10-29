@@ -22,3 +22,20 @@ Describe 'AD-Schnellanlage.ps1 - Datei' {
         ('{0:X2}{1:X2}{2:X2}' -f $bytes[0], $bytes[1], $bytes[2]) | Should Be 'EFBBBF'
     }
 }
+
+Describe 'Module unter src/ - Dateien' {
+    $module = @(Get-ChildItem -Path (Join-Path $wurzel 'src') -Include '*.psm1', '*.psd1' -Recurse -File)
+
+    foreach ($m in $module) {
+        It "$($m.Name) hat keine Syntaxfehler" {
+            $tokens = $null
+            $parseFehler = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($m.FullName, [ref]$tokens, [ref]$parseFehler)
+            (@($parseFehler) | ForEach-Object { "Zeile $($_.Extent.StartLineNumber): $($_.Message)" }) -join '; ' | Should Be ''
+        }
+        It "$($m.Name) ist als UTF-8 mit BOM gespeichert" {
+            $bytes = [System.IO.File]::ReadAllBytes($m.FullName)
+            ('{0:X2}{1:X2}{2:X2}' -f $bytes[0], $bytes[1], $bytes[2]) | Should Be 'EFBBBF'
+        }
+    }
+}

@@ -795,6 +795,8 @@ function New-BenutzerAusPlan($Plan) {
 # Gemeinsamer Abschluss für einzelne Eingabe und Schnelleingabe:
 # Passwörter -> Einstellungen -> Extras -> Vorschau -> Erstellen
 function Complete-BenutzerAnlage {
+    # Zufallspasswörter entstehen im Script und müssen für die Passwortliste im Klartext vorliegen
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '')]
     param([object[]]$Plaene, [string]$PwModus, [securestring]$GleichesPw)
 
     # 1) Passwörter
