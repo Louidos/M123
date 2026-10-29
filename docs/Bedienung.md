@@ -43,6 +43,23 @@ gelöscht, sondern nur aufgelistet.
 Zufallspasswörter werden als `Passwoerter_<Datum>.csv` im selben Ordner gespeichert –
 nach dem Verteilen löschen!
 
+## Subnetzrechner [S]
+
+Reiner IPv4-Rechner, auch auf Servern ohne AD und ohne DNS-Rolle. Er ändert nichts am Server.
+
+- Eingabe der Maske als `255.255.252.0`, `255.255.252` (fehlende Teile = 0), `/22` oder `22`,
+  danach die IP-Adresse im Netz (Enter = `192.168.0.0`).
+- Oder alles in einer Zeile: `192.168.10.37/26` bzw. `192.168.10.37 255.255.255.192`.
+- Ausgabe: Maske, CIDR, Wildcard-Maske, Maske binär, Netz-/Host-Bits, Netz- und
+  Broadcast-Adresse, erster/letzter Host, nutzbare Hosts, Adressen gesamt und Bereich.
+  /31 (Punkt-zu-Punkt) und /32 (eine Adresse) werden als Sonderfälle angezeigt.
+- Ungültige Eingaben werden gemeldet und neu gefragt, Enter geht zurück ins Hauptmenü.
+
+Beispiel `192.168.10.37/26`: Netz `192.168.10.0`, Broadcast `192.168.10.63`,
+Hosts `192.168.10.1` bis `192.168.10.62`, 62 nutzbare Hosts.
+
+Abschaltbar unter [E] → Module ein/aus (`Funktionen.Subnetzrechner`).
+
 ## Namensregeln
 
 Alle Werte lassen sich im Menü **[E]** ändern und dauerhaft speichern, siehe [Einstellungen.md](Einstellungen.md).

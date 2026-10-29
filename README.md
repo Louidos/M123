@@ -42,6 +42,7 @@ Für die AD-Punkte braucht es einen Domänencontroller oder das Windows-Feature
 | 7 | Mitglieder zu Gruppen hinzufügen |
 | 8 | Rückgängig machen anhand des Protokolls (AD und DNS) |
 | D | DNS: Rolle installieren, Forward-/Reverse-Zonen, Einträge per Schnelleingabe mit automatischem PTR, fehlende PTR auffüllen (fehlende Reverse-Zonen gleich mit anlegen), Weiterleitungen, Namensauflösung testen |
+| S | Subnetzrechner (IPv4): Maske, Netz, Broadcast, erster/letzter Host, Anzahl Hosts – braucht weder AD noch DNS |
 | E | Einstellungen: Präfixe, Namensmuster, Benutzer-Standards, DNS und Module ändern und dauerhaft speichern |
 | P | Protokoll der Sitzung anzeigen |
 

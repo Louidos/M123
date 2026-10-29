@@ -6,6 +6,9 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
 ## Unveröffentlicht
 
+### Hinzugefügt
+- Hauptmenü [S] Subnetzrechner (IPv4): Maske als `255.255.252.0`, `255.255.252`, `/22` oder gleich mit IP (`192.168.10.37/26`); zeigt Maske, Wildcard, binär, Netz, Broadcast, erster/letzter Host, Anzahl Hosts und Bereich. Läuft ohne AD und DNS, unter [E] abschaltbar.
+
 ### Entfernt
 - CSV-Import für Benutzer (Menüpunkt [3]) und CSV-Vorlage ([V]) samt Schalter `Funktionen.CsvImport`. Benutzer anlegen geht weiter einzeln oder per Schnelleingabe unter [2]. CSV-Protokoll, Passwortliste und Rückgängig bleiben.
 

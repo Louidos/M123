@@ -107,6 +107,7 @@ $Funktionen = [ordered]@{
     Mitgliedschaften    = $true   # [7]
     Rueckgaengig        = $true   # [8] (braucht Protokoll)
     DNS                 = $true   # [D] DNS-Menü
+    Subnetzrechner      = $true   # [S] Subnetzrechner (braucht weder AD noch DNS)
     # Zusatzschritte in den Abläufen
     Schnelleingabe      = $true   # Benutzer: alle Namen in einer Zeile
     ZufallsPasswort     = $true   # Benutzer: zufällige Passwörter + Liste
@@ -2147,6 +2148,154 @@ function Start-DnsTest {
 }
 #endregion
 
+#region ======================= MODUL [S] SUBNETZRECHNER ============
+# Reiner IPv4-Rechner: braucht weder AD noch DNS und ändert nichts am Server.
+
+# "192.168.8.0" -> Zahl (ungültig -> $null)
+function ConvertTo-IpZahl([string]$Text) {
+    if ((Get-IpArt $Text) -ne 'IPv4') { return $null }
+    [int64]$zahl = 0
+    foreach ($oktett in "$Text".Trim().Split('.')) { $zahl = $zahl * 256 + [int64]$oktett }
+    return $zahl
+}
+
+# Zahl -> die 4 Oktette
+function Get-IpOktette([int64]$Zahl) {
+    return @((($Zahl -shr 24) -band 255), (($Zahl -shr 16) -band 255), (($Zahl -shr 8) -band 255), ($Zahl -band 255))
+}
+
+# Zahl -> "192.168.8.0"
+function ConvertTo-IpText([int64]$Zahl) {
+    return (Get-IpOktette $Zahl) -join '.'
+}
+
+# Zahl -> "11111111.11111111.11111100.00000000"
+function ConvertTo-IpBinaer([int64]$Zahl) {
+    return (@(Get-IpOktette $Zahl | ForEach-Object { [Convert]::ToString([int]$_, 2).PadLeft(8, '0') }) -join '.')
+}
+
+# Präfix (z.B. 22) -> Maske als Zahl
+function Get-MaskeAusPraefix([int]$Praefix) {
+    return ([int64]4294967296 - ([int64]1 -shl (32 - $Praefix)))
+}
+
+# Maske "255.255.252.0", "255.255.252" (Rest wird mit 0 aufgefüllt), "/22" oder "22" -> Präfix (ungültig -> $null)
+function Get-PraefixAusEingabe([string]$Eingabe) {
+    $e = "$Eingabe".Trim()
+    if ($e -match '^/?\d{1,2}$') {
+        $p = [int]$e.TrimStart('/')
+        if ($p -le 32) { return $p }
+        return $null
+    }
+    $teile = @($e.Split('.') | Where-Object { $_ -ne '' })
+    if ($teile.Count -lt 1 -or $teile.Count -gt 4) { return $null }
+    while ($teile.Count -lt 4) { $teile += '0' }
+    $zahl = ConvertTo-IpZahl ($teile -join '.')
+    if ($null -eq $zahl) { return $null }
+    # welches Präfix ergibt genau diese Maske? (255.255.253.0 ist keine gültige Maske)
+    for ($p = 0; $p -le 32; $p++) { if ((Get-MaskeAusPraefix $p) -eq $zahl) { return $p } }
+    return $null
+}
+
+# Eingabe "/22", "255.255.252.0", "192.168.10.37/26" oder "192.168.10.37 255.255.255.192"
+# -> Ip (Zahl, $null = nicht angegeben) und Praefix ($null = ungültig)
+function ConvertFrom-SubnetzEingabe([string]$Text) {
+    $e = [pscustomobject]@{ Ip = $null; Praefix = $null }
+    $teile = @(("$Text".Trim() -replace '\s*/\s*', ' /') -split '\s+' | Where-Object { $_ })
+    if ($teile.Count -eq 1) { $e.Praefix = Get-PraefixAusEingabe $teile[0] }
+    elseif ($teile.Count -eq 2 -and (Get-IpArt $teile[0]) -eq 'IPv4') {
+        $e.Praefix = Get-PraefixAusEingabe $teile[1]
+        if ($null -ne $e.Praefix) { $e.Ip = ConvertTo-IpZahl $teile[0] }
+    }
+    return $e
+}
+
+# Alles zu IP + Präfix berechnen (ohne Ausgabe)
+function Get-SubnetzInfo([int64]$Ip, [int]$Praefix) {
+    $maske     = Get-MaskeAusPraefix $Praefix
+    $hostBits  = 32 - $Praefix
+    $adressen  = [int64]1 -shl $hostBits
+    $netz      = $Ip - ($Ip % $adressen)
+    $broadcast = $netz + $adressen - 1
+    if ($Praefix -le 30) {
+        $hosts = $adressen - 2; $erster = $netz + 1; $letzter = $broadcast - 1
+        $formel = "(2^$hostBits - 2)"; $hinweis = ''
+    }
+    elseif ($Praefix -eq 31) {
+        $hosts = 2; $erster = $netz; $letzter = $broadcast
+        $formel = ''; $hinweis = 'Sonderfall /31: Punkt-zu-Punkt-Verbindung (RFC 3021), nichts reserviert.'
+    }
+    else {
+        $hosts = 1; $erster = $netz; $letzter = $netz
+        $formel = ''; $hinweis = 'Sonderfall /32: genau eine einzelne Adresse, nichts reserviert.'
+    }
+    return [pscustomobject]@{
+        Ip          = ConvertTo-IpText $Ip
+        Praefix     = $Praefix
+        Maske       = ConvertTo-IpText $maske
+        Wildcard    = ConvertTo-IpText ($adressen - 1)
+        MaskeBinaer = ConvertTo-IpBinaer $maske
+        HostBits    = $hostBits
+        Netz        = ConvertTo-IpText $netz
+        Broadcast   = ConvertTo-IpText $broadcast
+        ErsterHost  = ConvertTo-IpText $erster
+        LetzterHost = ConvertTo-IpText $letzter
+        Hosts       = [int64]$hosts
+        Adressen    = $adressen
+        Formel      = $formel
+        Reserviert  = ($Praefix -le 30)    # Netz- und Broadcast-Adresse sind reserviert
+        Hinweis     = $hinweis
+    }
+}
+
+function Show-SubnetzInfo($Info) {
+    Write-Host ''
+    Write-Host '  Ergebnis' -ForegroundColor Cyan
+    Write-Info ('Eingegebene IP     : {0}' -f $Info.Ip)
+    Write-Info ('Subnetzmaske       : {0}' -f $Info.Maske)
+    Write-Host ('  CIDR-Schreibweise  : /{0}' -f $Info.Praefix) -ForegroundColor Yellow
+    Write-Info ('Wildcard-Maske     : {0}' -f $Info.Wildcard)
+    Write-Info ('Maske binär        : {0}' -f $Info.MaskeBinaer)
+    Write-Info ('Netz-/Host-Bits    : {0} / {1}' -f $Info.Praefix, $Info.HostBits)
+    Write-Host ''
+    Write-Host '  Reservierte Adressen' -ForegroundColor Cyan
+    if ($Info.Reserviert) {
+        Write-Info ('Netzadresse        : {0}' -f $Info.Netz)
+        Write-Info ('Broadcast-Adresse  : {0}' -f $Info.Broadcast)
+    }
+    else { Write-Info $Info.Hinweis }
+    Write-Host ''
+    Write-Host '  Hosts' -ForegroundColor Cyan
+    Write-Info ('Erster Host        : {0}' -f $Info.ErsterHost)
+    Write-Info ('Letzter Host       : {0}' -f $Info.LetzterHost)
+    Write-Ok   ('Nutzbare Hosts     : {0:N0}  {1}' -f $Info.Hosts, $Info.Formel)
+    Write-Info ('Adressen gesamt    : {0:N0}  (2^{1})' -f $Info.Adressen, $Info.HostBits)
+    Write-Host ''
+    Write-Host ('  Bereich            : {0}  bis  {1}' -f $Info.Netz, $Info.Broadcast) -ForegroundColor Yellow
+}
+
+# [S]
+function Start-Subnetzrechner {
+    Write-Titel 'Subnetzrechner'
+    Write-Info 'Maske als 255.255.252.0, 255.255.252 (Rest = 0) oder /22 - oder gleich mit IP: 192.168.10.37/26'
+    while ($true) {
+        $eingabe = Read-Text 'Subnetzmaske oder IP/Präfix (Enter = zurück)'
+        if (-not $eingabe) { return }
+        $e = ConvertFrom-SubnetzEingabe $eingabe
+        if ($null -eq $e.Praefix) {
+            Write-Warnung 'Ungültige Eingabe! Die Einsen der Maske müssen am Stück von links kommen (z.B. 255.255.252.0 oder /22), mit IP z.B. 192.168.10.37/26.'
+            continue
+        }
+        $ip = $e.Ip
+        while ($null -eq $ip) {
+            $ip = ConvertTo-IpZahl (Read-Text 'IP-Adresse im Netz' '192.168.0.0')
+            if ($null -eq $ip) { Write-Warnung 'Ungültige IP-Adresse! Beispiel: 192.168.8.0' }
+        }
+        Show-SubnetzInfo (Get-SubnetzInfo -Ip $ip -Praefix $e.Praefix)
+    }
+}
+#endregion
+
 #region ======================= EINSTELLUNGEN [E] ====================
 
 # Alle Werte, die unter [E] änderbar sind. Schluessel = Variablenname bzw. 'Tabelle.Schlüssel'
@@ -2190,7 +2339,7 @@ function Get-EinstellungsDefinitionen {
         OU = '[1] OUs erstellen'; Benutzer = '[2] Benutzer erstellen'
         GlobaleGruppen = '[3] Globale Gruppen'; DLGruppen = '[4] Domänenlokale Gruppen'; AGDLP = '[5] AGDLP-Paket'
         Abteilung = '[6] Abteilung komplett'; Mitgliedschaften = '[7] Mitgliedschaften'; Rueckgaengig = '[8] Rückgängig'
-        DNS = '[D] DNS-Menü'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
+        DNS = '[D] DNS-Menü'; Subnetzrechner = '[S] Subnetzrechner'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
         VorlageBenutzer = 'Benutzer: Vorlage kopieren'; GruppenZuweisen = 'Gruppen direkt zuweisen'
         AbteilungAusfuellen = 'Benutzer: Feld Abteilung'; EmailAusfuellen = 'Benutzer: E-Mail ausfüllen'
         HomeOrdner = 'Benutzer: Home-Ordner'; NTFSRechte = 'DL-Gruppen: NTFS-Rechte'; Freigabe = 'DL-Gruppen: SMB-Freigabe'
@@ -2682,6 +2831,7 @@ function Get-Hauptmenue {
         [pscustomobject]@{ Taste = '7'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
         [pscustomobject]@{ Taste = '8'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
         [pscustomobject]@{ Taste = 'D'; Text = 'DNS: Zonen, Einträge, PTR, Weiterleitungen';                  An = $Funktionen.DNS;              Braucht = @();     Aktion = { Start-DnsMenue } }
+        [pscustomobject]@{ Taste = 'S'; Text = 'Subnetzrechner (IPv4: Netz, Broadcast, Hosts)';              An = $Funktionen.Subnetzrechner;   Braucht = @();     Aktion = { Start-Subnetzrechner } }
         [pscustomobject]@{ Taste = 'E'; Text = 'Einstellungen ansehen und ändern';                            An = $true;                        Braucht = @();     Aktion = { Start-Einstellungen } }
         [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }
     )

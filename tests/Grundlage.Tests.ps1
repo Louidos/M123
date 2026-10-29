@@ -120,7 +120,7 @@ Describe 'Get-Hauptmenue' {
     $menue = @(Get-Hauptmenue)
 
     It 'enthält alle bisherigen Menüpunkte' {
-        (@($menue | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,4,5,6,7,8,D,E,P'
+        (@($menue | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,4,5,6,7,8,D,S,E,P'
     }
     It 'hat keinen CSV-Import und keine CSV-Vorlage mehr' {
         @($menue | Where-Object { $_.Taste -eq 'V' -or $_.Text -match 'CSV' }).Count | Should Be 0
@@ -128,10 +128,11 @@ Describe 'Get-Hauptmenue' {
     It 'hat keine doppelten Tasten' {
         @($menue | Group-Object Taste | Where-Object { $_.Count -gt 1 }).Count | Should Be 0
     }
-    It 'verlangt AD für alle AD-Punkte, nicht für P' {
+    It 'verlangt AD für alle AD-Punkte, nicht für S und P' {
         @($menue | Where-Object { $_.Taste -match '^[1-7]$' -and @($_.Braucht) -notcontains 'AD' }).Count | Should Be 0
         (@(($menue | Where-Object { $_.Taste -eq '8' }).Braucht) -join ',') | Should Be 'AD|DNS'
         @(($menue | Where-Object { $_.Taste -eq 'P' }).Braucht).Count | Should Be 0
+        @(($menue | Where-Object { $_.Taste -eq 'S' }).Braucht).Count | Should Be 0
     }
     It 'zeigt das aktuelle Präfix im Text' {
         $PrefixGG = 'GG-'
