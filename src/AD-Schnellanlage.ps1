@@ -1,13 +1,16 @@
 ﻿#Requires -Version 5.1
-#Requires -Modules ActiveDirectory
 <#
 .SYNOPSIS
     AD-Schnellanlage - OUs, Benutzer und Gruppen in Sekunden anlegen.
 
 .DESCRIPTION
-    Interaktives Menue fuer Windows Server mit Active Directory.
+    Interaktives Menue fuer Windows Server.
     Nutzt ausschliesslich Bordmittel: ActiveDirectory-Modul, SmbShare-Modul,
     .NET und - wenn vorhanden - Out-GridView. Keine externen Programme.
+
+    Das Script prueft beim Start, was auf dem Server vorhanden ist (Active Directory,
+    DNS-Rolle, SMB, Auswahlfenster, Adminrechte). Menuepunkte, die hier nicht laufen
+    koennen, werden mit Grund als "nicht verfuegbar" angezeigt.
 
     Menue (jeder Punkt einzeln ein-/ausschaltbar unter KONFIGURATION -> $Funktionen):
       [1] OUs erstellen (auch verschachtelt: Firma/Buchhaltung)
@@ -22,10 +25,16 @@
       [P] Protokoll der Sitzung anzeigen
 
 .NOTES
+    Version: 1.0.0
     Start:   powershell.exe -ExecutionPolicy Bypass -File .\AD-Schnellanlage.ps1
-    Laeuft auf einem Domaenencontroller oder einem Server mit dem Windows-Feature
-    "RSAT-AD-PowerShell". Enter uebernimmt immer den Vorschlag in [eckigen Klammern].
+    AD-Funktionen brauchen einen Domaenencontroller oder das Windows-Feature
+    "RSAT-AD-PowerShell". Ohne AD startet das Script trotzdem.
+    Enter uebernimmt immer den Vorschlag in [eckigen Klammern].
+    Tests:   Pester laedt die Funktionen per Dot-Sourcing (". .\AD-Schnellanlage.ps1"),
+             dabei startet das Menue nicht.
 #>
+
+$ScriptVersion = '1.0.0'
 
 #region ======================= KONFIGURATION =======================
 # Alles in diesem Block darf angepasst werden.
@@ -1339,52 +1348,189 @@ function Show-Protokoll {
 }
 #endregion
 
+#region ======================= FÄHIGKEITEN =========================
+
+# Lädt ein Modul ohne Meldungen; $true = verfügbar
+function Import-ModulStill([string]$Name) {
+    if (Get-Module -Name $Name) { return $true }
+    if (-not (Get-Module -ListAvailable -Name $Name)) { return $false }
+    try {
+        Import-Module -Name $Name -ErrorAction Stop -WarningAction SilentlyContinue -Verbose:$false | Out-Null
+        return $true
+    }
+    catch { return $false }
+}
+
+function Test-Befehl([string]$Name) {
+    return [bool](Get-Command -Name $Name -ErrorAction SilentlyContinue)
+}
+
+function Test-Adminrechte {
+    try {
+        $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        return ([System.Security.Principal.WindowsPrincipal]::new($id)).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch { return $false }
+}
+
+# Was kann dieser Server? Ändert nichts und bricht nie ab.
+# Rückgabe: AD, DNS, DnsRolle, DnsDienst, Smb, Gui, Admin, ServerManager ($true/$false),
+#           Domain (Ergebnis von Get-ADDomain) und Grund (Text je fehlender Fähigkeit)
+function Get-Faehigkeiten {
+    $f = @{
+        AD            = $false
+        Domain        = $null
+        DNS           = $false
+        DnsRolle      = $false
+        DnsDienst     = $false
+        Smb           = Test-Befehl 'New-SmbShare'
+        Gui           = Test-Befehl 'Out-GridView'
+        Admin         = Test-Adminrechte
+        ServerManager = Import-ModulStill 'ServerManager'
+        Grund         = @{}
+    }
+
+    # Active Directory: Modul + erreichbare Domäne
+    if (-not (Import-ModulStill 'ActiveDirectory')) {
+        $f.Grund.AD = 'AD - Modul ActiveDirectory fehlt (Feature RSAT-AD-PowerShell)'
+    }
+    else {
+        try {
+            $f.Domain = Get-ADDomain -ErrorAction Stop
+            $f.AD     = $true
+        }
+        catch { $f.Grund.AD = "AD - Domäne nicht erreichbar ($($_.Exception.Message))" }
+    }
+
+    # DNS: Rolle (Windows-Feature), Dienst, Modul
+    if ($f.ServerManager) {
+        try   { $f.DnsRolle = [bool](Get-WindowsFeature -Name DNS -ErrorAction Stop).Installed }
+        catch { $f.DnsRolle = $false }
+    }
+    $dienst = Get-Service -Name DNS -ErrorAction SilentlyContinue
+    if ($dienst -and -not $f.ServerManager) { $f.DnsRolle = $true }   # ohne ServerManager: Dienst vorhanden = Rolle da
+    $f.DnsDienst = [bool]($dienst -and "$($dienst.Status)" -eq 'Running')
+    if (-not $f.DnsRolle)                         { $f.Grund.DNS = 'DNS - Rolle nicht installiert' }
+    elseif (-not $f.DnsDienst)                    { $f.Grund.DNS = 'DNS - Dienst läuft nicht' }
+    elseif (-not (Import-ModulStill 'DnsServer')) { $f.Grund.DNS = 'DNS - Modul DnsServer fehlt' }
+    else                                          { $f.DNS = $true }
+
+    if (-not $f.Smb) { $f.Grund.Smb = 'SMB - Modul SmbShare fehlt' }
+    if (-not $f.Gui) { $f.Grund.Gui = 'Auswahlfenster (Out-GridView) nicht vorhanden' }
+    return $f
+}
+
+# Bedingungen eines Menüpunkts prüfen: '' = verfügbar, sonst der Grund.
+# Jeder Eintrag in $Braucht muss erfüllt sein; 'AD|DNS' = eines von beiden reicht.
+function Get-FehlendeFaehigkeit([string[]]$Braucht, [hashtable]$Faehig) {
+    foreach ($bedingung in @($Braucht | Where-Object { $_ })) {
+        $alternativen = @($bedingung -split '\|' | Where-Object { $_ })
+        if (@($alternativen | Where-Object { $Faehig[$_] }).Count) { continue }
+        $gruende = @($alternativen | ForEach-Object {
+            if ($Faehig.Grund -and $Faehig.Grund[$_]) { $Faehig.Grund[$_] } else { "$_ nicht verfügbar" }
+        })
+        return ($gruende -join ' / ')
+    }
+    return ''
+}
+
+# Werte, die vom AD abhängen (nur aufrufen, wenn AD verfügbar ist)
+function Initialize-AdUmgebung {
+    $script:Domain = $script:Faehig.Domain
+    $PSDefaultParameterValues['*-AD*:Server'] = $Domain.PDCEmulator
+    if (-not $MailDomain) { $script:MailDomain = $Domain.DNSRoot }
+    if (-not $UPNSuffix)  { $script:UPNSuffix  = $Domain.DNSRoot }
+    $richtlinie = Get-ADDefaultDomainPasswordPolicy -ErrorAction SilentlyContinue
+    if ($richtlinie) { $script:PwRichtlinie = $richtlinie }
+}
+#endregion
+
+#region ======================= HAUPTMENÜ ===========================
+
+# Wird in jedem Durchlauf neu gebaut, damit Präfixe und Fähigkeiten aktuell sind.
+# An = Schalter aus $Funktionen (aus = ausgeblendet), Braucht = nötige Fähigkeiten
+function Get-Hauptmenue {
+    return @(
+        [pscustomobject]@{ Taste = '1'; Text = 'OUs erstellen (auch verschachtelt: Firma/Buchhaltung)';      An = $Funktionen.OU;               Braucht = @('AD'); Aktion = { Start-OUs } }
+        [pscustomobject]@{ Taste = '2'; Text = 'Benutzer erstellen (einzeln oder Schnelleingabe)';           An = $Funktionen.Benutzer;         Braucht = @('AD'); Aktion = { Start-BenutzerAnlage } }
+        [pscustomobject]@{ Taste = '3'; Text = 'Benutzer aus CSV importieren';                               An = $Funktionen.CsvImport;        Braucht = @('AD'); Aktion = { Import-BenutzerCsv } }
+        [pscustomobject]@{ Taste = 'V'; Text = 'CSV-Vorlage erstellen';                                      An = $Funktionen.CsvImport;        Braucht = @();     Aktion = { New-CsvVorlage } }
+        [pscustomobject]@{ Taste = '4'; Text = "Globale Gruppen ($PrefixGG<Name>)";                          An = $Funktionen.GlobaleGruppen;   Braucht = @('AD'); Aktion = { Start-GlobaleGruppen } }
+        [pscustomobject]@{ Taste = '5'; Text = "Domänenlokale Gruppen + Rechte ($PrefixDL<Name>$TrennerRechte<Rechte>)"; An = $Funktionen.DLGruppen; Braucht = @('AD'); Aktion = { Start-DLGruppen } }
+        [pscustomobject]@{ Taste = '6'; Text = 'AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte';      An = $Funktionen.AGDLP;            Braucht = @('AD'); Aktion = { Start-AGDLP } }
+        [pscustomobject]@{ Taste = '7'; Text = 'Abteilung komplett: OU + Unter-OUs + Gruppen + Benutzer';    An = $Funktionen.Abteilung;        Braucht = @('AD'); Aktion = { Start-Abteilung } }
+        [pscustomobject]@{ Taste = '8'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
+        [pscustomobject]@{ Taste = '9'; Text = 'Rückgängig machen anhand des Protokolls';                    An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD'); Aktion = { Start-Rueckgaengig } }
+        [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }
+    )
+}
+
+function Show-Startanzeige {
+    $f = $script:Faehig
+    Write-Titel "AD-Schnellanlage $ScriptVersion"
+    if ($f.AD)  { Write-Ok "Active Directory: ja ($($Domain.DNSRoot))" } else { Write-Info "Active Directory: nein  ($($f.Grund.AD))" }
+    if ($f.DNS) { Write-Ok 'DNS-Server:       ja' }                        else { Write-Info "DNS-Server:       nein  ($($f.Grund.DNS))" }
+    $modus = if ($script:GuiVerfuegbar) { 'Auswahlfenster (Out-GridView)' }
+             elseif (-not $f.Gui)       { 'Konsole (Out-GridView nicht vorhanden)' }
+             else                       { 'Konsole (Auswahlfenster abgeschaltet)' }
+    Write-Info "Auswahlmodus:     $modus"
+    if (-not $f.Admin) { Write-Warnung 'Keine Administratorrechte - Änderungen am Server schlagen wahrscheinlich fehl. Script "Als Administrator" starten.' }
+}
+#endregion
+
 #region ======================= START ===============================
 
-try { $Domain = Get-ADDomain -ErrorAction Stop }
-catch {
-    Write-Host "  Domäne nicht erreichbar: $($_.Exception.Message)" -ForegroundColor Red
-    return
+function Start-Hauptprogramm {
+    $script:Faehig       = Get-Faehigkeiten
+    $script:Domain       = $null
+    $script:PwRichtlinie = [pscustomobject]@{ MinPasswordLength = 8; ComplexityEnabled = $true }
+    if ($script:Faehig.AD) { Initialize-AdUmgebung }
+
+    if (-not $LogOrdner) {
+        $basis = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
+        $script:LogOrdner = Join-Path $basis 'AD-Schnellanlage-Protokolle'
+    }
+    if (-not (Test-Path -LiteralPath $LogOrdner)) {
+        try   { New-Item -ItemType Directory -Path $LogOrdner -Force -ErrorAction Stop | Out-Null }
+        catch { Write-Warnung "Protokollordner nicht anlegbar: $($_.Exception.Message)" }
+    }
+    $script:LogDatei          = Join-Path $LogOrdner ('AD-Anlage_{0:yyyy-MM-dd_HH-mm-ss}.csv' -f (Get-Date))
+    $script:Ergebnisse        = [System.Collections.Generic.List[object]]::new()
+    $script:LogFehlerGemeldet = $false
+    $script:GuiVerfuegbar     = $Funktionen.FensterAuswahl -and $script:Faehig.Gui
+
+    Show-Startanzeige
+
+    while ($true) {
+        $punkte = @(Get-Hauptmenue | Where-Object { $_.An })
+        $titel  = if ($Domain) { "AD-Schnellanlage $ScriptVersion   Domäne: $($Domain.DNSRoot)" } else { "AD-Schnellanlage $ScriptVersion   Server: $env:COMPUTERNAME" }
+        Write-Titel $titel
+        $gesperrt = [ordered]@{}
+        foreach ($m in $punkte) {
+            $grund = Get-FehlendeFaehigkeit $m.Braucht $script:Faehig
+            if ($grund) { $gesperrt[$grund] = @($gesperrt[$grund]) + "[$($m.Taste)]"; continue }
+            Write-Host ('  [{0}] {1}' -f $m.Taste, $m.Text)
+        }
+        Write-Host '  [0] Beenden'
+        foreach ($grund in @($gesperrt.Keys)) {
+            Write-Host ('  Nicht verfügbar: {0}  ->  {1}' -f (@($gesperrt[$grund] | Where-Object { $_ }) -join ' '), $grund) -ForegroundColor DarkGray
+        }
+
+        $wahl = "$(Read-Host '  Auswahl')".Trim().ToUpper()
+        if ($wahl -in '0', 'Q', 'X') { break }
+        $punkt = @($punkte | Where-Object { $_.Taste -eq $wahl }) | Select-Object -First 1
+        if (-not $punkt) { Write-Warnung 'Ungültige Auswahl.'; continue }
+        $grund = Get-FehlendeFaehigkeit $punkt.Braucht $script:Faehig
+        if ($grund) { Write-Warnung "[$($punkt.Taste)] ist auf diesem Server nicht verfügbar: $grund"; continue }
+        try { & $punkt.Aktion }
+        catch [System.OperationCanceledException] { Write-Warnung 'Abgebrochen - zurück zum Menü.' }
+        catch { Write-Host "  FEHLER: $($_.Exception.Message)" -ForegroundColor Red }
+    }
+
+    if ($script:Ergebnisse.Count -and $Funktionen.Protokoll) { Write-Info "Protokoll gespeichert: $script:LogDatei" }
+    Write-Info 'Auf Wiedersehen.'
 }
-$PSDefaultParameterValues['*-AD*:Server'] = $Domain.PDCEmulator
-if (-not $MailDomain) { $MailDomain = $Domain.DNSRoot }
-if (-not $UPNSuffix)  { $UPNSuffix  = $Domain.DNSRoot }
-$script:PwRichtlinie = Get-ADDefaultDomainPasswordPolicy -ErrorAction SilentlyContinue
-if (-not $script:PwRichtlinie) { $script:PwRichtlinie = [pscustomobject]@{ MinPasswordLength = 8; ComplexityEnabled = $true } }
-if (-not $LogOrdner) { $LogOrdner = Join-Path $PSScriptRoot 'AD-Schnellanlage-Protokolle' }
-if (-not (Test-Path -LiteralPath $LogOrdner)) { New-Item -ItemType Directory -Path $LogOrdner -Force | Out-Null }
-$script:LogDatei          = Join-Path $LogOrdner ('AD-Anlage_{0:yyyy-MM-dd_HH-mm-ss}.csv' -f (Get-Date))
-$script:Ergebnisse        = [System.Collections.Generic.List[object]]::new()
-$script:LogFehlerGemeldet = $false
-$script:GuiVerfuegbar     = $Funktionen.FensterAuswahl -and [bool](Get-Command Out-GridView -ErrorAction SilentlyContinue)
-
-$menue = @(
-    [pscustomobject]@{ Taste = '1'; Text = 'OUs erstellen (auch verschachtelt: Firma/Buchhaltung)';      An = $Funktionen.OU;               Aktion = { Start-OUs } }
-    [pscustomobject]@{ Taste = '2'; Text = 'Benutzer erstellen (einzeln oder Schnelleingabe)';           An = $Funktionen.Benutzer;         Aktion = { Start-BenutzerAnlage } }
-    [pscustomobject]@{ Taste = '3'; Text = 'Benutzer aus CSV importieren';                               An = $Funktionen.CsvImport;        Aktion = { Import-BenutzerCsv } }
-    [pscustomobject]@{ Taste = 'V'; Text = 'CSV-Vorlage erstellen';                                      An = $Funktionen.CsvImport;        Aktion = { New-CsvVorlage } }
-    [pscustomobject]@{ Taste = '4'; Text = "Globale Gruppen ($PrefixGG<Name>)";                          An = $Funktionen.GlobaleGruppen;   Aktion = { Start-GlobaleGruppen } }
-    [pscustomobject]@{ Taste = '5'; Text = "Domänenlokale Gruppen + Rechte ($PrefixDL<Name>$TrennerRechte<Rechte>)"; An = $Funktionen.DLGruppen; Aktion = { Start-DLGruppen } }
-    [pscustomobject]@{ Taste = '6'; Text = 'AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte';      An = $Funktionen.AGDLP;            Aktion = { Start-AGDLP } }
-    [pscustomobject]@{ Taste = '7'; Text = 'Abteilung komplett: OU + Unter-OUs + Gruppen + Benutzer';    An = $Funktionen.Abteilung;        Aktion = { Start-Abteilung } }
-    [pscustomobject]@{ Taste = '8'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Aktion = { Start-Mitgliedschaften } }
-    [pscustomobject]@{ Taste = '9'; Text = 'Rückgängig machen anhand des Protokolls';                    An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Aktion = { Start-Rueckgaengig } }
-    [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Aktion = { Show-Protokoll } }
-)
-
-while ($true) {
-    Write-Titel "AD-Schnellanlage   Domäne: $($Domain.DNSRoot)"
-    foreach ($m in @($menue | Where-Object { $_.An })) { Write-Host ('  [{0}] {1}' -f $m.Taste, $m.Text) }
-    Write-Host '  [0] Beenden'
-    $wahl = "$(Read-Host '  Auswahl')".Trim().ToUpper()
-    if ($wahl -in '0', 'Q', 'X') { break }
-    $punkt = @($menue | Where-Object { $_.An -and $_.Taste -eq $wahl }) | Select-Object -First 1
-    if (-not $punkt) { Write-Warnung 'Ungültige Auswahl.'; continue }
-    try { & $punkt.Aktion }
-    catch [System.OperationCanceledException] { Write-Warnung 'Abgebrochen - zurück zum Menü.' }
-    catch { Write-Host "  FEHLER: $($_.Exception.Message)" -ForegroundColor Red }
-}
-
-if ($script:Ergebnisse.Count -and $Funktionen.Protokoll) { Write-Info "Protokoll gespeichert: $script:LogDatei" }
-Write-Info 'Auf Wiedersehen.'
 #endregion
+
+# Nur bei direktem Aufruf starten, nicht beim Dot-Sourcing (Pester lädt so die Funktionen)
+if ($MyInvocation.InvocationName -ne '.') { Start-Hauptprogramm }
