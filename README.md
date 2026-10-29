@@ -68,7 +68,7 @@ bei grüner CI.
 
 ## Projektstand
 
-Version **2.1.0** – Gruppenrichtlinien [G] (Netzlaufwerke, Standard-Richtlinien), DHCP [H] als geführter Assistent mit AD-Autorisierung, Reservierungen und DNS-Integration. Änderungen siehe [CHANGELOG.md](CHANGELOG.md).
+Version **2.1.1** – alles in einer Datei. Gruppenrichtlinien [G] (Netzlaufwerke, Standard-Richtlinien), DHCP [H] als geführter Assistent mit AD-Autorisierung, Reservierungen und DNS-Integration. Änderungen siehe [CHANGELOG.md](CHANGELOG.md).
 
 ## Lizenz
 

@@ -44,7 +44,7 @@
       [P] Protokoll der Sitzung anzeigen
 
 .NOTES
-    Version: 2.1.0 (Gruppenrichtlinien [G], DHCP [H] mit DNS-Integration)
+    Version: 2.1.1 (alles in einer Datei: AD, DNS, Gruppenrichtlinien, DHCP)
     Start:   powershell.exe -ExecutionPolicy Bypass -File .\AD-Schnellanlage.ps1
     AD-Funktionen brauchen einen Domaenencontroller oder das Windows-Feature
     "RSAT-AD-PowerShell". Ohne AD startet das Script trotzdem.
@@ -53,7 +53,7 @@
              dabei startet das Menue nicht.
 #>
 
-$ScriptVersion = '2.1.0'
+$ScriptVersion = '2.1.1'
 
 #region ======================= KONFIGURATION =======================
 # Alles in diesem Block darf angepasst werden. Einfacher: Menüpunkt [E] Einstellungen -

@@ -6,6 +6,8 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
 ## Unveröffentlicht
 
+## 2.1.1 – 2026-10-29
+
 ### Geändert
 - Das Script ist wieder **eine einzige Datei**: Gruppenrichtlinien [G] und DHCP [H] stecken direkt in `AD-Schnellanlage.ps1`, der Ordner `Module` entfällt. Zum Installieren genügt es, diese eine Datei auf den Server zu kopieren; Bedienung und Menüs bleiben gleich (#19).
 
