@@ -45,7 +45,7 @@ Für die AD-Punkte braucht es einen Domänencontroller oder das Windows-Feature
 | 8 | Rückgängig machen anhand des Protokolls (AD und DNS) |
 | D | DNS: Rolle installieren, Forward-/Reverse-Zonen, Einträge per Schnelleingabe mit automatischem PTR, fehlende PTR auffüllen (fehlende Reverse-Zonen gleich mit anlegen), Weiterleitungen, Namensauflösung testen |
 | G | Gruppenrichtlinien: GPO erstellen, Netzlaufwerk per GPO zuordnen (optional nur für eine Gruppe), Standard-Richtlinien (Systemsteuerung, Desktophintergrund, cmd, USB, Bildschirmsperre – erweiterbar), mit OU verknüpfen, anzeigen, entfernen |
-| H | DHCP: Einrichtungs-Assistent (Rolle, Autorisierung im AD, Server-Manager-Hinweis weg, Bereich mit Vorschlägen aus der Netzwerkkarte und Prüfungen), Reservierungen (MAC in jeder Schreibweise), Bereiche/Leases anzeigen, entfernen, alles aus einer Datei |
+| H | DHCP: Einrichtungs-Assistent (Rolle, Autorisierung im AD, Server-Manager-Hinweis weg, Bereich mit Vorschlägen aus der Netzwerkkarte und Prüfungen), Reservierungen (MAC in jeder Schreibweise), Bereiche/Leases anzeigen, entfernen, alles aus einer Datei; DNS-Integration (Clients automatisch mit A- und PTR-Eintrag, Reverse-Zone, Dienstkonto, Alterung) einrichten und prüfen |
 | S | Subnetzrechner (IPv4): Maske, Netz, Broadcast, erster/letzter Host, Anzahl Hosts – braucht weder AD noch DNS |
 | E | Einstellungen: Präfixe, Namensmuster, Benutzer-Standards, DNS und Module ändern und dauerhaft speichern |
 | P | Protokoll der Sitzung anzeigen |

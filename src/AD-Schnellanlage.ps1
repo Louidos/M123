@@ -36,7 +36,8 @@
       [H] DHCP: Einrichtungs-Assistent (Rolle, Sicherheitsgruppen, Autorisierung im AD,
           Server-Manager-Hinweis, Bereich mit Vorschlaegen aus der Netzwerkkarte und
           Pruefungen), Bereiche, Reservierungen (MAC in jeder Schreibweise), anzeigen,
-          entfernen, ganze Konfiguration aus Datei
+          entfernen, ganze Konfiguration aus Datei, DNS-Integration (dynamische
+          Updates, Reverse-Zone, Dienstkonto, Alterung) einrichten und pruefen
       [S] Subnetzrechner (IPv4): Maske, Netz, Broadcast, erster/letzter Host, Anzahl
           Hosts - braucht weder AD noch DNS
       [E] Einstellungen: Praefixe, Namensmuster, Benutzer-Standards, DNS und Module
@@ -1188,7 +1189,7 @@ function Start-Rueckgaengig {
     $adTypen = 'Mitglied', 'Benutzer', 'Gruppe', 'OU'
     $rueck   = @($daten | Where-Object { $typen -contains $_.Typ })
     $manuell = @($daten | Where-Object { $_.Typ -in 'Ordner', 'NTFS', 'Home' } | Select-Object -ExpandProperty DN -Unique)
-    $hinweis = @($daten | Where-Object { $_.Typ -in 'DNS-Rolle', 'DNS-Forwarder' -or $_.Typ -like 'GPO*' -or $_.Typ -like 'DHCP*' })
+    $hinweis = @($daten | Where-Object { $_.Typ -in 'DNS-Rolle', 'DNS-Forwarder', 'DNS-Alterung', 'DNS-Zone-Updates' -or $_.Typ -like 'GPO*' -or $_.Typ -like 'DHCP*' })
     if ($rueck.Count -eq 0) {
         Write-Warnung 'In diesem Protokoll gibt es nichts zum Rückgängigmachen.'
         foreach ($h in $hinweis) { Write-Info "Wird nicht zurückgebaut: $($h.Typ) $($h.Name)" }
