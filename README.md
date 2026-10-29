@@ -5,7 +5,7 @@ Interaktives PowerShell-Script für Windows Server: OUs, Benutzer und Gruppen
 CSV-Protokoll und Rückgängig-Funktion.
 
 - **Eine Datei:** `src/AD-Schnellanlage.ps1`, direkt auf den Server kopierbar
-- **Nur Bordmittel:** Windows PowerShell 5.1, Module `ActiveDirectory`, `SmbShare`, .NET, `Out-GridView` (falls vorhanden)
+- **Nur Bordmittel:** Windows PowerShell 5.1, Module `ActiveDirectory`, `DnsServer`, `ServerManager`, `SmbShare`, `DnsClient`, .NET, `Out-GridView` (falls vorhanden)
 - **Offline:** kein Internet, kein `Install-Module`, keine externen Programme
 
 ## Installation
@@ -39,10 +39,11 @@ Für die AD-Punkte braucht es einen Domänencontroller oder das Windows-Feature
 | 6 | AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte |
 | 7 | Abteilung komplett: OU + Unter-OUs + Gruppen + Ordner + Benutzer |
 | 8 | Mitglieder zu Gruppen hinzufügen |
-| 9 | Rückgängig machen anhand des Protokolls |
+| 9 | Rückgängig machen anhand des Protokolls (AD und DNS) |
+| D | DNS: Rolle installieren, Forward-/Reverse-Zonen, Einträge per Schnelleingabe mit automatischem PTR, fehlende PTR auffüllen, Weiterleitungen, Namensauflösung testen |
 | P | Protokoll der Sitzung anzeigen |
 
-Ausführliche Bedienung: [docs/Bedienung.md](docs/Bedienung.md)
+Ausführliche Bedienung: [docs/Bedienung.md](docs/Bedienung.md) · DNS: [docs/DNS.md](docs/DNS.md)
 
 ## Entwicklung
 
