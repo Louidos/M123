@@ -10,6 +10,7 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 - Das Script startet jetzt auch auf Servern ohne Active Directory und zeigt nur die Funktionen an, die dort möglich sind; beim Start stehen Version, erkannte Rollen und Auswahlmodus (#2).
 
 ### Hinzugefügt
+- Menü [E] Einstellungen: Präfixe, Namensmuster, DNS-Standards und Module direkt im Script ändern und dauerhaft speichern (#4).
 - DNS-Menü [D]: DNS-Rolle installieren, Forward- und Reverse-Zonen anlegen, A/AAAA/CNAME/MX-Einträge per Schnelleingabe mit automatischem PTR, fehlende PTR auffüllen, Weiterleitungen setzen, Namensauflösung testen; alles im Protokoll und rückgängig machbar (#3).
 - Repo-Struktur (src, tests, docs, scripts), Syntax-Prüfung und automatische Tests bei jedem Pull Request.
 

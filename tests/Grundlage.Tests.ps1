@@ -120,7 +120,7 @@ Describe 'Get-Hauptmenue' {
     $menue = @(Get-Hauptmenue)
 
     It 'enthält alle bisherigen Menüpunkte' {
-        (@($menue | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,V,4,5,6,7,8,9,D,P'
+        (@($menue | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,V,4,5,6,7,8,9,D,E,P'
     }
     It 'hat keine doppelten Tasten' {
         @($menue | Group-Object Taste | Where-Object { $_.Count -gt 1 }).Count | Should Be 0

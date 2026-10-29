@@ -1,0 +1,14 @@
+{
+  "_Hinweis": "Beispiel. Als Einstellungen.json neben AD-Schnellanlage.ps1 legen (oder im Menü [E] speichern). Nur Werte eintragen, die vom Standard abweichen; Einträge mit _ am Anfang sind Kommentare.",
+  "PrefixGG": "GG-",
+  "PrefixDL": "DL-",
+  "BenutzernameMuster": "{v}{nachname}",
+  "EmailMuster": "{vorname}.{nachname}@{domain}",
+  "MailDomain": "firma.de",
+  "PasswortLaenge": 16,
+  "StandardKonto.PwNieAb": false,
+  "AbteilungsUnterOUs": ["Benutzer", "Gruppen"],
+  "DnsStandardTTL": "00:30:00",
+  "DnsWeiterleitungen": ["192.168.10.1", "192.168.10.2"],
+  "Funktionen.FensterAuswahl": false
+}
