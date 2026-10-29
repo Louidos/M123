@@ -19,7 +19,12 @@ CSV-Protokoll und Rückgängig-Funktion.
 powershell.exe -ExecutionPolicy Bypass -File .\AD-Schnellanlage.ps1
 ```
 
-Läuft auf einem Domänencontroller oder einem Server mit dem Windows-Feature
+Das Script startet auf jedem Windows Server mit PowerShell 5.1. Beim Start prüft es,
+was vorhanden ist (Active Directory, DNS-Rolle, SMB, Auswahlfenster, Adminrechte), und
+zeigt Version, erkannte Rollen und Auswahlmodus an. Menüpunkte, die auf diesem Server
+nicht laufen können, stehen unter „Nicht verfügbar“ mit Grund.
+
+Für die AD-Punkte braucht es einen Domänencontroller oder das Windows-Feature
 `RSAT-AD-PowerShell`. Enter übernimmt immer den Vorschlag in `[eckigen Klammern]`.
 
 ## Menü

@@ -1,5 +1,25 @@
 # Bedienung
 
+## Start und Rollen-Erkennung
+
+Beim Start zeigt das Script:
+
+```
+  AD-Schnellanlage 1.0.0
+  Active Directory: ja (firma.local)
+  DNS-Server:       nein  (DNS - Rolle nicht installiert)
+  Auswahlmodus:     Auswahlfenster (Out-GridView)
+```
+
+Geprüft wird: Lässt sich das Modul `ActiveDirectory` laden und ist die Domäne erreichbar?
+Ist das Windows-Feature `DNS` installiert (über `ServerManager`), läuft der DNS-Dienst,
+gibt es das Modul `DnsServer`? Gibt es `New-SmbShare` und `Out-GridView`? Laufen wir als
+Administrator (sonst Hinweis)?
+
+Menüpunkte, die auf diesem Server nicht gehen, erscheinen gesammelt unter
+`Nicht verfügbar: [1] [2] … -> Grund`. Das Script bricht wegen einer fehlenden Rolle nie ab.
+Mit `$Funktionen` abgeschaltete Punkte sind wie bisher ganz ausgeblendet.
+
 ## Grundregeln
 
 - **Enter** übernimmt immer den Vorschlag in `[eckigen Klammern]`.
