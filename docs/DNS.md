@@ -135,7 +135,7 @@ IPv6-Adressen ohne Reverse-Zone erscheinen nur als Hinweis (Zone von Hand anlege
 oder leerer Auswahl geht es nur mit den Adressen weiter, die schon eine Reverse-Zone haben.
 
 Zum Schluss die Liste der fehlenden PTR-Einträge und „Diese PTR-Einträge jetzt erstellen?“.
-Neue Zonen und PTR-Einträge stehen im Protokoll; [8] Rückgängig entfernt zuerst die Einträge,
+Neue Zonen und PTR-Einträge stehen im Protokoll; [8] Rückgängig im Hauptmenü entfernt zuerst die Einträge,
 dann die leeren Zonen.
 
 ## [7] Weiterleitungen
@@ -149,7 +149,7 @@ ins Internet.
 `Resolve-DnsName -Server <DNS-Server> -DnsOnly` für einen Namen oder eine IP
 (IP = Rückwärtssuche). Ergebnis als Tabelle; Enter = zurück.
 
-## Protokoll und Rückgängig [9]
+## Protokoll und Rückgängig [8] (Hauptmenü)
 
 | Typ | Name | DN | Bezug |
 |-----|------|----|-------|
@@ -158,7 +158,7 @@ ins Internet.
 | `DNS-Rolle` | `DNS` | Server | – |
 | `DNS-Forwarder` | IP(s) | Server | – |
 
-[9] entfernt zuerst genau die protokollierten DNS-Einträge (Name + Typ + Daten müssen passen,
+[8] entfernt zuerst genau die protokollierten DNS-Einträge (Name + Typ + Daten müssen passen,
 andere Einträge mit gleichem Namen bleiben), dann die protokollierten Zonen – aber nur, wenn
 außer SOA/NS nichts mehr drin ist. Die DNS-Rolle und die Weiterleitungen werden **nicht**
 zurückgebaut, nur als Hinweis aufgelistet. Stehen AD-Objekte im Protokoll, aber AD ist hier

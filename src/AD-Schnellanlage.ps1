@@ -16,13 +16,12 @@
     Menue (jeder Punkt einzeln ein-/ausschaltbar unter KONFIGURATION -> $Funktionen):
       [1] OUs erstellen (auch verschachtelt: Firma/Buchhaltung)
       [2] Benutzer erstellen (einzeln oder Schnelleingabe in einer Zeile)
-      [3] Benutzer aus CSV importieren          [V] CSV-Vorlage erstellen
-      [4] Globale Gruppen               -> GG_Name
-      [5] Domaenenlokale Gruppen + Rechte -> DL_Name_M
-      [6] AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte
-      [7] Abteilung komplett: OU + Unter-OUs + Gruppen + Ordner + Benutzer
-      [8] Mitglieder zu Gruppen hinzufuegen
-      [9] Rueckgaengig machen anhand des Protokolls (AD und DNS)
+      [3] Globale Gruppen               -> GG_Name
+      [4] Domaenenlokale Gruppen + Rechte -> DL_Name_M
+      [5] AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte
+      [6] Abteilung komplett: OU + Unter-OUs + Gruppen + Ordner + Benutzer
+      [7] Mitglieder zu Gruppen hinzufuegen
+      [8] Rueckgaengig machen anhand des Protokolls (AD und DNS)
       [D] DNS: Status, Rolle installieren, Forward-/Reverse-Zonen, Eintraege per
           Schnelleingabe (srv01=192.168.10.5, www=srv01, @=MX:mail:10) mit
           automatischem PTR, fehlende PTR auffuellen, Weiterleitungen, Namensaufloesung
@@ -101,13 +100,12 @@ $Funktionen = [ordered]@{
     # Menüpunkte
     OU                  = $true   # [1]
     Benutzer            = $true   # [2]
-    CsvImport           = $true   # [3] + [V]
-    GlobaleGruppen      = $true   # [4]
-    DLGruppen           = $true   # [5]
-    AGDLP               = $true   # [6]
-    Abteilung           = $true   # [7]
-    Mitgliedschaften    = $true   # [8]
-    Rueckgaengig        = $true   # [9] (braucht Protokoll)
+    GlobaleGruppen      = $true   # [3]
+    DLGruppen           = $true   # [4]
+    AGDLP               = $true   # [5]
+    Abteilung           = $true   # [6]
+    Mitgliedschaften    = $true   # [7]
+    Rueckgaengig        = $true   # [8] (braucht Protokoll)
     DNS                 = $true   # [D] DNS-Menü
     # Zusatzschritte in den Abläufen
     Schnelleingabe      = $true   # Benutzer: alle Namen in einer Zeile
@@ -790,7 +788,7 @@ function New-BenutzerAusPlan($Plan) {
     if ($Plan.HomeBasis) { New-HomeOrdner $benutzer $Plan.HomeBasis }
 }
 
-# Gemeinsamer Abschluss für manuell, Schnelleingabe und CSV:
+# Gemeinsamer Abschluss für einzelne Eingabe und Schnelleingabe:
 # Passwörter -> Einstellungen -> Extras -> Vorschau -> Erstellen
 function Complete-BenutzerAnlage {
     param([object[]]$Plaene, [string]$PwModus, [securestring]$GleichesPw)
@@ -1009,151 +1007,7 @@ function Start-BenutzerAnlage {
 }
 #endregion
 
-#region ======================= MODUL [3] CSV-IMPORT =================
-
-# Liest UTF-8 (mit/ohne BOM) und ANSI (Excel), Trennzeichen ; oder ,
-function Import-CsvAuto([string]$Pfad) {
-    $voll  = (Resolve-Path -LiteralPath $Pfad).ProviderPath
-    $bytes = [System.IO.File]::ReadAllBytes($voll)
-    try { $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes) }
-    catch {
-        $ansi = if ($PSVersionTable.PSVersion.Major -lt 6) { [System.Text.Encoding]::Default } else { [System.Text.Encoding]::GetEncoding(28591) }
-        $text = $ansi.GetString($bytes)
-    }
-    $zeilen = @($text.TrimStart([char]0xFEFF) -split '\r?\n' | Where-Object { $_.Trim() })
-    if ($zeilen.Count -lt 2) { return }
-    $trenner = if ($zeilen[0].Contains(';')) { ';' } else { ',' }
-    return ($zeilen | ConvertFrom-Csv -Delimiter $trenner)
-}
-
-# OU-Angabe aus der CSV: DN, "Firma/Buchhaltung", "firma.local/Firma/Buchhaltung" oder nur "Buchhaltung"
-function Resolve-OuWert([string]$Wert, [object[]]$Ziele) {
-    if ($Wert -match '=') {
-        $treffer = @($Ziele | Where-Object { $_.DN -eq $Wert })
-    }
-    else {
-        $w = $Wert.Replace('\', '/').Trim('/')
-        $treffer = @($Ziele | Where-Object { $_.Pfad -eq "$($Domain.DNSRoot)/$w" -or $_.Pfad -eq $w })
-        if ($treffer.Count -eq 0) { $treffer = @($Ziele | Where-Object { $_.Pfad.EndsWith("/$w", [System.StringComparison]::OrdinalIgnoreCase) }) }
-    }
-    if ($treffer.Count -eq 1) { return $treffer[0].DN }
-    return $null
-}
-
-function Resolve-GruppeName([string]$Name, [hashtable]$Cache) {
-    if ($Cache.ContainsKey($Name)) { return $Cache[$Name] }
-    $esc = ConvertTo-LdapWert $Name
-    $treffer = @(Get-ADGroup -LDAPFilter "(|(sAMAccountName=$esc)(name=$esc))" -ErrorAction SilentlyContinue)
-    $dn = if ($treffer.Count -eq 1) { $treffer[0].DistinguishedName } else { '' }
-    $Cache[$Name] = $dn
-    return $dn
-}
-
-function Import-BenutzerCsv {
-    Write-Titel 'Benutzer aus CSV importieren'
-    Write-Info 'Spalten: Vorname;Nachname;Anmeldename;Passwort;OU;Abteilung;Gruppen'
-    Write-Info 'Pflicht: Vorname + Nachname. Mehrere Gruppen mit | trennen. Vorlage: Menüpunkt [V].'
-    $pfad = (Read-Text 'Pfad zur CSV-Datei (Enter = abbrechen)').Trim('"')
-    if (-not $pfad) { Stop-Aktion }
-    if (-not (Test-Path -LiteralPath $pfad -PathType Leaf)) { Write-Warnung 'Datei nicht gefunden.'; return }
-
-    $zeilen = @(Import-CsvAuto $pfad)
-    if ($zeilen.Count -eq 0) { Write-Warnung 'Keine Datenzeilen gefunden.'; return }
-    $spalten = @($zeilen[0].PSObject.Properties.Name)
-    if ($spalten -notcontains 'Vorname' -or $spalten -notcontains 'Nachname') {
-        Write-Warnung "Spalten 'Vorname' und 'Nachname' fehlen (Trennzeichen ; oder ,)."
-        return
-    }
-
-    $ziele        = @(Get-ZielListe)
-    $gruppenCache = @{}
-    $standardZiel = $null
-    $vergeben     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $plaene       = [System.Collections.Generic.List[object]]::new()
-    $nr           = 1
-
-    foreach ($z in $zeilen) {
-        $nr++
-        $v = "$($z.Vorname)".Trim()
-        $n = "$($z.Nachname)".Trim()
-        if (-not $v -or -not $n) { Write-Warnung "Zeile ${nr}: Vor- oder Nachname fehlt - übersprungen."; continue }
-
-        $ouWert = "$($z.OU)".Trim()
-        if ($ouWert) {
-            $ziel = Resolve-OuWert $ouWert $ziele
-            if (-not $ziel) { Write-Warnung "Zeile ${nr}: OU '$ouWert' nicht gefunden oder nicht eindeutig - übersprungen."; continue }
-        }
-        else {
-            if (-not $standardZiel) {
-                Write-Info 'Mindestens eine Zeile hat keine OU angegeben.'
-                $standardZiel = Select-AdZiel 'Benutzer ohne OU-Angabe'
-            }
-            $ziel = $standardZiel
-        }
-
-        $sam = "$($z.Anmeldename)".Trim()
-        if ($sam) {
-            if ($sam.Length -gt 20 -or $sam -match '["/\\\[\]:;|=,+*?<>\s]' -or $vergeben.Contains($sam) -or (Test-SamVorhanden $sam)) {
-                Write-Warnung "Zeile ${nr}: Anmeldename '$sam' ungültig oder vergeben - übersprungen."
-                continue
-            }
-        }
-        else { $sam = Get-FreierAnmeldename $v $n $vergeben }
-
-        $pw = "$($z.Passwort)"
-        if ($pw) {
-            $problem = Test-PasswortRichtlinie $pw
-            if ($problem) { Write-Warnung "Zeile ${nr} ($sam): $problem - übersprungen."; continue }
-        }
-
-        $p = New-BenutzerPlan $v $n $ziel
-        Set-PlanAnmeldename $p $sam $vergeben
-        if ($pw) { $p.Passwort = ConvertTo-SecureString $pw -AsPlainText -Force; $p.PasswortArt = 'aus CSV' }
-        if ("$($z.Abteilung)".Trim()) { $p.Abteilung = "$($z.Abteilung)".Trim() }
-        foreach ($g in ("$($z.Gruppen)" -split '[|,]')) {
-            $g = $g.Trim()
-            if (-not $g) { continue }
-            $dn = Resolve-GruppeName $g $gruppenCache
-            if ($dn) { $p.Gruppen.Add($dn) } else { Write-Warnung "Zeile ${nr}: Gruppe '$g' nicht gefunden - wird ignoriert." }
-        }
-        $plaene.Add($p)
-    }
-
-    if ($plaene.Count -eq 0) { Write-Warnung 'Keine gültigen Zeilen.'; return }
-    Write-Ok "$($plaene.Count) Benutzer aus der CSV vorbereitet."
-
-    $ohnePw     = @($plaene | Where-Object { -not $_.Passwort })
-    $modus      = ''
-    $gleichesPw = $null
-    if ($ohnePw.Count) {
-        Write-Info "$($ohnePw.Count) Benutzer haben kein Passwort in der CSV."
-        $modus = Select-PasswortModus $ohnePw.Count
-        if ($modus -eq 'Gleich') { $gleichesPw = Read-Passwort 'alle ohne CSV-Passwort' }
-    }
-    Complete-BenutzerAnlage -Plaene $plaene.ToArray() -PwModus $modus -GleichesPw $gleichesPw
-}
-
-function New-CsvVorlage {
-    Write-Titel 'CSV-Vorlage erstellen'
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    if (-not $desktop) { $desktop = [Environment]::GetFolderPath('MyDocuments') }
-    if (-not $desktop) { $desktop = (Get-Location).ProviderPath }
-    $pfad = (Read-Text 'Speichern unter' (Join-Path $desktop 'Benutzer-Import.csv')).Trim('"')
-    if ((Test-Path -LiteralPath $pfad) -and -not (Read-JaNein 'Datei existiert schon. Überschreiben?' $false)) { Stop-Aktion }
-    $beispiel = @(
-        [pscustomobject]@{ Vorname = 'Max';  Nachname = 'Muster';   Anmeldename = '';           Passwort = ''; OU = 'Firma/Buchhaltung'; Abteilung = 'Buchhaltung'; Gruppen = "$($PrefixGG)Buchhaltung" }
-        [pscustomobject]@{ Vorname = 'Anna'; Nachname = 'Beispiel'; Anmeldename = 'a.beispiel'; Passwort = ''; OU = '';                  Abteilung = '';            Gruppen = "$($PrefixGG)Alle|$($PrefixGG)Vertrieb" }
-    )
-    try {
-        $beispiel | Export-Csv -LiteralPath $pfad -NoTypeInformation -Delimiter ';' -Encoding UTF8 -ErrorAction Stop
-        Write-Ok "Vorlage gespeichert: $pfad"
-        Write-Info 'Leere Felder = automatisch: Anmeldename nach Muster, OU wird gefragt, Passwort-Art wird gefragt.'
-    }
-    catch { Write-Warnung "Speichern fehlgeschlagen: $($_.Exception.Message)" }
-}
-#endregion
-
-#region ======================= MODUL [4] + [5] GRUPPEN ==============
+#region ======================= MODUL [3] + [4] GRUPPEN ==============
 
 function Start-GlobaleGruppen {
     Write-Titel "Globale Gruppe(n) erstellen   ($PrefixGG<Name>)"
@@ -1202,7 +1056,7 @@ function Start-DLGruppen {
 }
 #endregion
 
-#region ======================= MODUL [6] AGDLP ======================
+#region ======================= MODUL [5] AGDLP ======================
 
 function Start-AGDLP {
     Write-Titel 'AGDLP-Paket   (GG + DL + Verschachtelung + Ordnerrechte)'
@@ -1235,7 +1089,7 @@ function Start-AGDLP {
 }
 #endregion
 
-#region ======================= MODUL [7] ABTEILUNG ==================
+#region ======================= MODUL [6] ABTEILUNG ==================
 
 function Start-Abteilung {
     Write-Titel 'Abteilung komplett anlegen'
@@ -1282,7 +1136,7 @@ function Start-Abteilung {
 }
 #endregion
 
-#region ======================= MODUL [8] MITGLIEDSCHAFTEN ===========
+#region ======================= MODUL [7] MITGLIEDSCHAFTEN ===========
 
 function Start-Mitgliedschaften {
     Write-Titel 'Mitglieder zu Gruppen hinzufügen'
@@ -1296,7 +1150,7 @@ function Start-Mitgliedschaften {
 }
 #endregion
 
-#region ======================= MODUL [9] RÜCKGÄNGIG =================
+#region ======================= MODUL [8] RÜCKGÄNGIG =================
 
 function Start-Rueckgaengig {
     Write-Titel 'Rückgängig machen (aus Protokoll)'
@@ -2333,9 +2187,9 @@ function Get-EinstellungsDefinitionen {
     & $neu $g 'DnsAutoPTR'         'PTR automatisch anlegen'    'Bool'
     & $neu $g 'DnsWeiterleitungen' 'Vorschlag Weiterleitungen'  'IPListe' "IP-Adressen mit Komma, '-' = keine"
     $texte = @{
-        OU = '[1] OUs erstellen'; Benutzer = '[2] Benutzer erstellen'; CsvImport = '[3] CSV-Import + [V] Vorlage'
-        GlobaleGruppen = '[4] Globale Gruppen'; DLGruppen = '[5] Domänenlokale Gruppen'; AGDLP = '[6] AGDLP-Paket'
-        Abteilung = '[7] Abteilung komplett'; Mitgliedschaften = '[8] Mitgliedschaften'; Rueckgaengig = '[9] Rückgängig'
+        OU = '[1] OUs erstellen'; Benutzer = '[2] Benutzer erstellen'
+        GlobaleGruppen = '[3] Globale Gruppen'; DLGruppen = '[4] Domänenlokale Gruppen'; AGDLP = '[5] AGDLP-Paket'
+        Abteilung = '[6] Abteilung komplett'; Mitgliedschaften = '[7] Mitgliedschaften'; Rueckgaengig = '[8] Rückgängig'
         DNS = '[D] DNS-Menü'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
         VorlageBenutzer = 'Benutzer: Vorlage kopieren'; GruppenZuweisen = 'Gruppen direkt zuweisen'
         AbteilungAusfuellen = 'Benutzer: Feld Abteilung'; EmailAusfuellen = 'Benutzer: E-Mail ausfüllen'
@@ -2512,8 +2366,11 @@ function ConvertFrom-EinstellungenJson([string]$Json, [object[]]$Definitionen) {
         $warnungen.Add('Einstellungen.json enthält kein JSON-Objekt { ... } - es gelten die Standardwerte.')
         return $ergebnis
     }
+    # Schlüssel aus älteren Versionen still ignorieren (fallen beim nächsten Speichern weg)
+    $veraltet = @('Funktionen.CsvImport')
     foreach ($p in $objekt.PSObject.Properties) {
         if ($p.Name.StartsWith('_')) { continue }   # Kommentare wie "_Hinweis"
+        if ($veraltet -contains $p.Name) { continue }
         $def = @($Definitionen | Where-Object { $_.Schluessel -eq $p.Name }) | Select-Object -First 1
         if (-not $def) { $warnungen.Add("Einstellungen.json: unbekannter Eintrag '$($p.Name)' - wird ignoriert."); continue }
         $pruefung = Test-EinstellungsWert $def $p.Value
@@ -2818,14 +2675,12 @@ function Get-Hauptmenue {
     return @(
         [pscustomobject]@{ Taste = '1'; Text = 'OUs erstellen (auch verschachtelt: Firma/Buchhaltung)';      An = $Funktionen.OU;               Braucht = @('AD'); Aktion = { Start-OUs } }
         [pscustomobject]@{ Taste = '2'; Text = 'Benutzer erstellen (einzeln oder Schnelleingabe)';           An = $Funktionen.Benutzer;         Braucht = @('AD'); Aktion = { Start-BenutzerAnlage } }
-        [pscustomobject]@{ Taste = '3'; Text = 'Benutzer aus CSV importieren';                               An = $Funktionen.CsvImport;        Braucht = @('AD'); Aktion = { Import-BenutzerCsv } }
-        [pscustomobject]@{ Taste = 'V'; Text = 'CSV-Vorlage erstellen';                                      An = $Funktionen.CsvImport;        Braucht = @();     Aktion = { New-CsvVorlage } }
-        [pscustomobject]@{ Taste = '4'; Text = "Globale Gruppen ($PrefixGG<Name>)";                          An = $Funktionen.GlobaleGruppen;   Braucht = @('AD'); Aktion = { Start-GlobaleGruppen } }
-        [pscustomobject]@{ Taste = '5'; Text = "Domänenlokale Gruppen + Rechte ($PrefixDL<Name>$TrennerRechte<Rechte>)"; An = $Funktionen.DLGruppen; Braucht = @('AD'); Aktion = { Start-DLGruppen } }
-        [pscustomobject]@{ Taste = '6'; Text = 'AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte';      An = $Funktionen.AGDLP;            Braucht = @('AD'); Aktion = { Start-AGDLP } }
-        [pscustomobject]@{ Taste = '7'; Text = 'Abteilung komplett: OU + Unter-OUs + Gruppen + Benutzer';    An = $Funktionen.Abteilung;        Braucht = @('AD'); Aktion = { Start-Abteilung } }
-        [pscustomobject]@{ Taste = '8'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
-        [pscustomobject]@{ Taste = '9'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
+        [pscustomobject]@{ Taste = '3'; Text = "Globale Gruppen ($PrefixGG<Name>)";                          An = $Funktionen.GlobaleGruppen;   Braucht = @('AD'); Aktion = { Start-GlobaleGruppen } }
+        [pscustomobject]@{ Taste = '4'; Text = "Domänenlokale Gruppen + Rechte ($PrefixDL<Name>$TrennerRechte<Rechte>)"; An = $Funktionen.DLGruppen; Braucht = @('AD'); Aktion = { Start-DLGruppen } }
+        [pscustomobject]@{ Taste = '5'; Text = 'AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte';      An = $Funktionen.AGDLP;            Braucht = @('AD'); Aktion = { Start-AGDLP } }
+        [pscustomobject]@{ Taste = '6'; Text = 'Abteilung komplett: OU + Unter-OUs + Gruppen + Benutzer';    An = $Funktionen.Abteilung;        Braucht = @('AD'); Aktion = { Start-Abteilung } }
+        [pscustomobject]@{ Taste = '7'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
+        [pscustomobject]@{ Taste = '8'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
         [pscustomobject]@{ Taste = 'D'; Text = 'DNS: Zonen, Einträge, PTR, Weiterleitungen';                  An = $Funktionen.DNS;              Braucht = @();     Aktion = { Start-DnsMenue } }
         [pscustomobject]@{ Taste = 'E'; Text = 'Einstellungen ansehen und ändern';                            An = $true;                        Braucht = @();     Aktion = { Start-Einstellungen } }
         [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }

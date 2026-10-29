@@ -6,6 +6,13 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
 ## Unveröffentlicht
 
+### Entfernt
+- CSV-Import für Benutzer (Menüpunkt [3]) und CSV-Vorlage ([V]) samt Schalter `Funktionen.CsvImport`. Benutzer anlegen geht weiter einzeln oder per Schnelleingabe unter [2]. CSV-Protokoll, Passwortliste und Rückgängig bleiben.
+
+### Geändert
+- Hauptmenü fortlaufend nummeriert: [3] Globale Gruppen, [4] Domänenlokale Gruppen, [5] AGDLP, [6] Abteilung, [7] Mitglieder, [8] Rückgängig.
+- Ein veralteter Eintrag `Funktionen.CsvImport` in `Einstellungen.json` wird still ignoriert und fällt beim nächsten Speichern weg.
+
 ### Hinzugefügt
 - [D][6] PTR auffüllen: Fehlen Reverse-Zonen, fragt das Script, ob sie gleich angelegt werden sollen. Auswahl je Netz (Vorschlag /24, `(alle)` möglich, auf /16 oder /8 anpassbar); danach werden die PTR-Einträge für die neuen Zonen automatisch geplant und nach Bestätigung erstellt. Zonen und Einträge lassen sich mit Rückgängig entfernen.
 

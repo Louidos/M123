@@ -92,6 +92,12 @@ Describe 'ConvertFrom-EinstellungenJson' {
         @($r.Warnungen)[0] | Should Match 'unbekannt'
         $r.Werte['PrefixGG'] | Should BeExactly 'GG-'
     }
+    It 'ignoriert veraltete Schlüssel ohne Warnung' {
+        $r = ConvertFrom-EinstellungenJson '{"Funktionen.CsvImport":false,"PrefixGG":"GG-"}' $definitionen
+        @($r.Warnungen).Count | Should Be 0
+        $r.Werte.Count | Should Be 1
+        $r.Werte.Contains('Funktionen.CsvImport') | Should Be $false
+    }
     It 'nimmt ungültige Werte nicht an' {
         $r = ConvertFrom-EinstellungenJson '{"PasswortLaenge":3}' $definitionen
         @($r.Warnungen).Count | Should Be 1
@@ -117,7 +123,7 @@ Describe 'Einstellungen ändern, speichern, laden, zurücksetzen' {
     It 'Präfix GG- wirkt sofort auf Menü und Beispiel' {
         Set-Einstellung 'PrefixGG' 'GG-'
         $PrefixGG | Should BeExactly 'GG-'
-        (@(Get-Hauptmenue) | Where-Object { $_.Taste -eq '4' }).Text | Should Match 'GG-<Name>'
+        (@(Get-Hauptmenue) | Where-Object { $_.Taste -eq '3' }).Text | Should Match 'GG-<Name>'
         Get-EinstellungsBeispiel 'PrefixGG' 'GG-' | Should BeExactly 'Globale Gruppe heißt dann: GG-Vertrieb'
     }
     It 'zeigt Beispiele für DL-Namen und Anmeldenamen' {

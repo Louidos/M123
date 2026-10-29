@@ -36,18 +36,12 @@ Mit `$Funktionen` abgeschaltete Punkte sind wie bisher ganz ausgeblendet.
 Jede Sitzung schreibt ein CSV-Protokoll nach `AD-Schnellanlage-Protokolle\AD-Anlage_<Datum>.csv`
 neben dem Script (Spalten `Zeit;Typ;Name;Status;DN;Bezug;Info`).
 
-[9] liest ein Protokoll und entfernt in dieser Reihenfolge: DNS-Einträge, DNS-Zonen (nur leere),
+[8] liest ein Protokoll und entfernt in dieser Reihenfolge: DNS-Einträge, DNS-Zonen (nur leere),
 Mitgliedschaften, Freigaben, Benutzer, Gruppen, OUs (nur leere). Details zu DNS: [DNS.md](DNS.md). Ordner, NTFS-Rechte und Home-Ordner werden **nicht**
 gelöscht, sondern nur aufgelistet.
 
 Zufallspasswörter werden als `Passwoerter_<Datum>.csv` im selben Ordner gespeichert –
 nach dem Verteilen löschen!
-
-## CSV-Import
-
-Spalten: `Vorname;Nachname;Anmeldename;Passwort;OU;Abteilung;Gruppen`
-(Trennzeichen `;` oder `,`, UTF-8 oder ANSI). Pflicht sind nur Vorname und Nachname.
-Mehrere Gruppen mit `|` trennen. Eine Vorlage erzeugt Menüpunkt [V].
 
 ## Namensregeln
 

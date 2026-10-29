@@ -35,14 +35,13 @@ Für die AD-Punkte braucht es einen Domänencontroller oder das Windows-Feature
 |-------|----------|
 | 1 | OUs erstellen (auch verschachtelt: `Firma/Buchhaltung`) |
 | 2 | Benutzer erstellen (einzeln oder Schnelleingabe in einer Zeile) |
-| 3 / V | Benutzer aus CSV importieren / CSV-Vorlage erstellen |
-| 4 | Globale Gruppen `GG_Name` |
-| 5 | Domänenlokale Gruppen + Rechte `DL_Name_M` |
-| 6 | AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte |
-| 7 | Abteilung komplett: OU + Unter-OUs + Gruppen + Ordner + Benutzer |
-| 8 | Mitglieder zu Gruppen hinzufügen |
-| 9 | Rückgängig machen anhand des Protokolls (AD und DNS) |
-| D | DNS: Rolle installieren, Forward-/Reverse-Zonen, Einträge per Schnelleingabe mit automatischem PTR, fehlende PTR auffüllen, Weiterleitungen, Namensauflösung testen |
+| 3 | Globale Gruppen `GG_Name` |
+| 4 | Domänenlokale Gruppen + Rechte `DL_Name_M` |
+| 5 | AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte |
+| 6 | Abteilung komplett: OU + Unter-OUs + Gruppen + Ordner + Benutzer |
+| 7 | Mitglieder zu Gruppen hinzufügen |
+| 8 | Rückgängig machen anhand des Protokolls (AD und DNS) |
+| D | DNS: Rolle installieren, Forward-/Reverse-Zonen, Einträge per Schnelleingabe mit automatischem PTR, fehlende PTR auffüllen (fehlende Reverse-Zonen gleich mit anlegen), Weiterleitungen, Namensauflösung testen |
 | E | Einstellungen: Präfixe, Namensmuster, Benutzer-Standards, DNS und Module ändern und dauerhaft speichern |
 | P | Protokoll der Sitzung anzeigen |
 
