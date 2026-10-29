@@ -1630,13 +1630,13 @@ function ConvertTo-ReverseZonenName([string]$Netz) {
     if ($praefix -notin 8, 16, 24) { $e.Fehler = "Präfix /$praefix geht nicht - nur /8, /16 oder /24 (klassenlose Reverse-Zonen sind nicht enthalten)"; return $e }
     $anzahl = [int]($praefix / 8)
     if ($oktette.Count -lt $anzahl) { $e.Fehler = "Für /$praefix braucht es mindestens $anzahl Zahlen vor dem /"; return $e }
-    $netz = @($oktette[0..($anzahl - 1)])
-    $voll = @($netz) + @(0, 0, 0, 0)
-    $rueck = @($netz)
-    [array]::Reverse($rueck)
+    $voll  = @(0, 0, 0, 0)
+    $rueck = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $anzahl; $i++) { $voll[$i] = [int]$oktette[$i] }
+    for ($i = $anzahl - 1; $i -ge 0; $i--) { $rueck.Add([string]$oktette[$i]) }
     $e.Praefix   = $praefix
     $e.NetworkId = '{0}.{1}.{2}.{3}/{4}' -f $voll[0], $voll[1], $voll[2], $voll[3], $praefix
-    $e.Zone      = ($rueck -join '.') + '.in-addr.arpa'
+    $e.Zone      = ($rueck.ToArray() -join '.') + '.in-addr.arpa'
     return $e
 }
 
