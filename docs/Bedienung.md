@@ -5,7 +5,7 @@
 Beim Start zeigt das Script:
 
 ```
-  AD-Schnellanlage 1.1.0
+  AD-Schnellanlage 2.0.0
   Active Directory: ja (firma.local)
   DNS-Server:       nein  (DNS - Rolle nicht installiert)
   Auswahlmodus:     Auswahlfenster (Out-GridView)
@@ -36,18 +36,29 @@ Mit `$Funktionen` abgeschaltete Punkte sind wie bisher ganz ausgeblendet.
 Jede Sitzung schreibt ein CSV-Protokoll nach `AD-Schnellanlage-Protokolle\AD-Anlage_<Datum>.csv`
 neben dem Script (Spalten `Zeit;Typ;Name;Status;DN;Bezug;Info`).
 
-[9] liest ein Protokoll und entfernt in dieser Reihenfolge: DNS-Einträge, DNS-Zonen (nur leere),
+[8] liest ein Protokoll und entfernt in dieser Reihenfolge: DNS-Einträge, DNS-Zonen (nur leere),
 Mitgliedschaften, Freigaben, Benutzer, Gruppen, OUs (nur leere). Details zu DNS: [DNS.md](DNS.md). Ordner, NTFS-Rechte und Home-Ordner werden **nicht**
 gelöscht, sondern nur aufgelistet.
 
 Zufallspasswörter werden als `Passwoerter_<Datum>.csv` im selben Ordner gespeichert –
 nach dem Verteilen löschen!
 
-## CSV-Import
+## Subnetzrechner [S]
 
-Spalten: `Vorname;Nachname;Anmeldename;Passwort;OU;Abteilung;Gruppen`
-(Trennzeichen `;` oder `,`, UTF-8 oder ANSI). Pflicht sind nur Vorname und Nachname.
-Mehrere Gruppen mit `|` trennen. Eine Vorlage erzeugt Menüpunkt [V].
+Reiner IPv4-Rechner, auch auf Servern ohne AD und ohne DNS-Rolle. Er ändert nichts am Server.
+
+- Eingabe der Maske als `255.255.252.0`, `255.255.252` (fehlende Teile = 0), `/22` oder `22`,
+  danach die IP-Adresse im Netz (Enter = `192.168.0.0`).
+- Oder alles in einer Zeile: `192.168.10.37/26` bzw. `192.168.10.37 255.255.255.192`.
+- Ausgabe: Maske, CIDR, Wildcard-Maske, Maske binär, Netz-/Host-Bits, Netz- und
+  Broadcast-Adresse, erster/letzter Host, nutzbare Hosts, Adressen gesamt und Bereich.
+  /31 (Punkt-zu-Punkt) und /32 (eine Adresse) werden als Sonderfälle angezeigt.
+- Ungültige Eingaben werden gemeldet und neu gefragt, Enter geht zurück ins Hauptmenü.
+
+Beispiel `192.168.10.37/26`: Netz `192.168.10.0`, Broadcast `192.168.10.63`,
+Hosts `192.168.10.1` bis `192.168.10.62`, 62 nutzbare Hosts.
+
+Abschaltbar unter [E] → Module ein/aus (`Funktionen.Subnetzrechner`).
 
 ## Namensregeln
 

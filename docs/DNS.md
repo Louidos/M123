@@ -108,9 +108,35 @@ Ein zweiter Lauf mit derselben Eingabe zeigt alles als `VORHANDEN`.
 ## [6] Fehlende PTR auffüllen
 
 Geht alle A/AAAA-Einträge einer oder aller Forward-Zonen durch. Für jede Adresse ohne PTR
-in einer vorhandenen Reverse-Zone wird ein PTR geplant (pro IP nur einer; echte Hostnamen
-haben Vorrang vor `@`, `DomainDnsZones`, `ForestDnsZones`). Erst Vorschau-Liste, dann
-Bestätigung. Adressen ohne passende Reverse-Zone werden gesammelt gemeldet.
+in einer vorhandenen Reverse-Zone wird ein PTR geplant. Pro IP nur einer: Die Namen aus allen
+gewählten Zonen werden gemeinsam sortiert, echte Hostnamen haben Vorrang vor `@`,
+`DomainDnsZones` und `ForestDnsZones`. Der PTR zeigt immer auf den vollständigen Namen,
+z. B. `dc01.lutefisk.local.`.
+
+Dienst-Namen (ein Namensteil beginnt mit `_`, z. B. `gc._msdcs`, `_ldap._tcp`) werden nie
+PTR-Ziel. Hat eine IP nur solche Namen, steht sie grau unter „Nur Dienst-Namen - kein PTR“.
+
+Adressen ohne passende Reverse-Zone werden gesammelt gemeldet (mit vollständigem Namen).
+Ist `$Funktionen.DnsZonen` an, fragt das Script „Passende Reverse-Zone(n) jetzt erstellen?“:
+
+1. Auswahl der Netze (Vorschlag /24), mehrere möglich, `(alle)` = alle Netze:
+   ```
+     [  1] (alle)
+     [  2] 192.168.8.0/24     ->  8.168.192.in-addr.arpa     (2 Adressen: dc01.lutefisk.local., dc02.lutefisk.local.)
+     [  3] 192.168.9.0/24     ->  9.168.192.in-addr.arpa     (1 Adresse: srv01.lutefisk.local.)
+   ```
+2. Optional „Netze anpassen (z. B. /16 statt /24)?“ – pro Netz ein anderes Netz eingeben
+   (`/8`, `/16`, `/24`; alle Adressen müssen darin liegen, `-` = Netz weglassen). Gleiche Zonen
+   werden nur einmal angelegt.
+3. AD-Integration und dynamische Updates wie unter [4], Vorschau, dann werden die Zonen angelegt.
+4. Danach sucht das Script neu – die PTR-Einträge für die neuen Zonen stehen sofort in der Liste.
+
+IPv6-Adressen ohne Reverse-Zone erscheinen nur als Hinweis (Zone von Hand anlegen). Bei Nein
+oder leerer Auswahl geht es nur mit den Adressen weiter, die schon eine Reverse-Zone haben.
+
+Zum Schluss die Liste der fehlenden PTR-Einträge und „Diese PTR-Einträge jetzt erstellen?“.
+Neue Zonen und PTR-Einträge stehen im Protokoll; [8] Rückgängig im Hauptmenü entfernt zuerst die Einträge,
+dann die leeren Zonen.
 
 ## [7] Weiterleitungen
 
@@ -123,7 +149,7 @@ ins Internet.
 `Resolve-DnsName -Server <DNS-Server> -DnsOnly` für einen Namen oder eine IP
 (IP = Rückwärtssuche). Ergebnis als Tabelle; Enter = zurück.
 
-## Protokoll und Rückgängig [9]
+## Protokoll und Rückgängig [8] (Hauptmenü)
 
 | Typ | Name | DN | Bezug |
 |-----|------|----|-------|
@@ -132,7 +158,7 @@ ins Internet.
 | `DNS-Rolle` | `DNS` | Server | – |
 | `DNS-Forwarder` | IP(s) | Server | – |
 
-[9] entfernt zuerst genau die protokollierten DNS-Einträge (Name + Typ + Daten müssen passen,
+[8] entfernt zuerst genau die protokollierten DNS-Einträge (Name + Typ + Daten müssen passen,
 andere Einträge mit gleichem Namen bleiben), dann die protokollierten Zonen – aber nur, wenn
 außer SOA/NS nichts mehr drin ist. Die DNS-Rolle und die Weiterleitungen werden **nicht**
 zurückgebaut, nur als Hinweis aufgelistet. Stehen AD-Objekte im Protokoll, aber AD ist hier

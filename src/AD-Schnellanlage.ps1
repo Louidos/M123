@@ -16,22 +16,24 @@
     Menue (jeder Punkt einzeln ein-/ausschaltbar unter KONFIGURATION -> $Funktionen):
       [1] OUs erstellen (auch verschachtelt: Firma/Buchhaltung)
       [2] Benutzer erstellen (einzeln oder Schnelleingabe in einer Zeile)
-      [3] Benutzer aus CSV importieren          [V] CSV-Vorlage erstellen
-      [4] Globale Gruppen               -> GG_Name
-      [5] Domaenenlokale Gruppen + Rechte -> DL_Name_M
-      [6] AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte
-      [7] Abteilung komplett: OU + Unter-OUs + Gruppen + Ordner + Benutzer
-      [8] Mitglieder zu Gruppen hinzufuegen
-      [9] Rueckgaengig machen anhand des Protokolls (AD und DNS)
+      [3] Globale Gruppen               -> GG_Name
+      [4] Domaenenlokale Gruppen + Rechte -> DL_Name_M
+      [5] AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte
+      [6] Abteilung komplett: OU + Unter-OUs + Gruppen + Ordner + Benutzer
+      [7] Mitglieder zu Gruppen hinzufuegen
+      [8] Rueckgaengig machen anhand des Protokolls (AD und DNS)
       [D] DNS: Status, Rolle installieren, Forward-/Reverse-Zonen, Eintraege per
           Schnelleingabe (srv01=192.168.10.5, www=srv01, @=MX:mail:10) mit
-          automatischem PTR, fehlende PTR auffuellen, Weiterleitungen, Namensaufloesung
+          automatischem PTR, fehlende PTR auffuellen (fehlende Reverse-Zonen dabei
+          gleich anlegen), Weiterleitungen, Namensaufloesung
+      [S] Subnetzrechner (IPv4): Maske, Netz, Broadcast, erster/letzter Host, Anzahl
+          Hosts - braucht weder AD noch DNS
       [E] Einstellungen: Praefixe, Namensmuster, Benutzer-Standards, DNS und Module
           ansehen, aendern und dauerhaft in Einstellungen.json speichern
       [P] Protokoll der Sitzung anzeigen
 
 .NOTES
-    Version: 1.1.0
+    Version: 2.0.0 (CSV-Import fuer Benutzer entfernt)
     Start:   powershell.exe -ExecutionPolicy Bypass -File .\AD-Schnellanlage.ps1
     AD-Funktionen brauchen einen Domaenencontroller oder das Windows-Feature
     "RSAT-AD-PowerShell". Ohne AD startet das Script trotzdem.
@@ -40,7 +42,7 @@
              dabei startet das Menue nicht.
 #>
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '2.0.0'
 
 #region ======================= KONFIGURATION =======================
 # Alles in diesem Block darf angepasst werden. Einfacher: Menüpunkt [E] Einstellungen -
@@ -101,14 +103,14 @@ $Funktionen = [ordered]@{
     # Menüpunkte
     OU                  = $true   # [1]
     Benutzer            = $true   # [2]
-    CsvImport           = $true   # [3] + [V]
-    GlobaleGruppen      = $true   # [4]
-    DLGruppen           = $true   # [5]
-    AGDLP               = $true   # [6]
-    Abteilung           = $true   # [7]
-    Mitgliedschaften    = $true   # [8]
-    Rueckgaengig        = $true   # [9] (braucht Protokoll)
+    GlobaleGruppen      = $true   # [3]
+    DLGruppen           = $true   # [4]
+    AGDLP               = $true   # [5]
+    Abteilung           = $true   # [6]
+    Mitgliedschaften    = $true   # [7]
+    Rueckgaengig        = $true   # [8] (braucht Protokoll)
     DNS                 = $true   # [D] DNS-Menü
+    Subnetzrechner      = $true   # [S] Subnetzrechner (braucht weder AD noch DNS)
     # Zusatzschritte in den Abläufen
     Schnelleingabe      = $true   # Benutzer: alle Namen in einer Zeile
     ZufallsPasswort     = $true   # Benutzer: zufällige Passwörter + Liste
@@ -790,7 +792,7 @@ function New-BenutzerAusPlan($Plan) {
     if ($Plan.HomeBasis) { New-HomeOrdner $benutzer $Plan.HomeBasis }
 }
 
-# Gemeinsamer Abschluss für manuell, Schnelleingabe und CSV:
+# Gemeinsamer Abschluss für einzelne Eingabe und Schnelleingabe:
 # Passwörter -> Einstellungen -> Extras -> Vorschau -> Erstellen
 function Complete-BenutzerAnlage {
     param([object[]]$Plaene, [string]$PwModus, [securestring]$GleichesPw)
@@ -1009,151 +1011,7 @@ function Start-BenutzerAnlage {
 }
 #endregion
 
-#region ======================= MODUL [3] CSV-IMPORT =================
-
-# Liest UTF-8 (mit/ohne BOM) und ANSI (Excel), Trennzeichen ; oder ,
-function Import-CsvAuto([string]$Pfad) {
-    $voll  = (Resolve-Path -LiteralPath $Pfad).ProviderPath
-    $bytes = [System.IO.File]::ReadAllBytes($voll)
-    try { $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes) }
-    catch {
-        $ansi = if ($PSVersionTable.PSVersion.Major -lt 6) { [System.Text.Encoding]::Default } else { [System.Text.Encoding]::GetEncoding(28591) }
-        $text = $ansi.GetString($bytes)
-    }
-    $zeilen = @($text.TrimStart([char]0xFEFF) -split '\r?\n' | Where-Object { $_.Trim() })
-    if ($zeilen.Count -lt 2) { return }
-    $trenner = if ($zeilen[0].Contains(';')) { ';' } else { ',' }
-    return ($zeilen | ConvertFrom-Csv -Delimiter $trenner)
-}
-
-# OU-Angabe aus der CSV: DN, "Firma/Buchhaltung", "firma.local/Firma/Buchhaltung" oder nur "Buchhaltung"
-function Resolve-OuWert([string]$Wert, [object[]]$Ziele) {
-    if ($Wert -match '=') {
-        $treffer = @($Ziele | Where-Object { $_.DN -eq $Wert })
-    }
-    else {
-        $w = $Wert.Replace('\', '/').Trim('/')
-        $treffer = @($Ziele | Where-Object { $_.Pfad -eq "$($Domain.DNSRoot)/$w" -or $_.Pfad -eq $w })
-        if ($treffer.Count -eq 0) { $treffer = @($Ziele | Where-Object { $_.Pfad.EndsWith("/$w", [System.StringComparison]::OrdinalIgnoreCase) }) }
-    }
-    if ($treffer.Count -eq 1) { return $treffer[0].DN }
-    return $null
-}
-
-function Resolve-GruppeName([string]$Name, [hashtable]$Cache) {
-    if ($Cache.ContainsKey($Name)) { return $Cache[$Name] }
-    $esc = ConvertTo-LdapWert $Name
-    $treffer = @(Get-ADGroup -LDAPFilter "(|(sAMAccountName=$esc)(name=$esc))" -ErrorAction SilentlyContinue)
-    $dn = if ($treffer.Count -eq 1) { $treffer[0].DistinguishedName } else { '' }
-    $Cache[$Name] = $dn
-    return $dn
-}
-
-function Import-BenutzerCsv {
-    Write-Titel 'Benutzer aus CSV importieren'
-    Write-Info 'Spalten: Vorname;Nachname;Anmeldename;Passwort;OU;Abteilung;Gruppen'
-    Write-Info 'Pflicht: Vorname + Nachname. Mehrere Gruppen mit | trennen. Vorlage: Menüpunkt [V].'
-    $pfad = (Read-Text 'Pfad zur CSV-Datei (Enter = abbrechen)').Trim('"')
-    if (-not $pfad) { Stop-Aktion }
-    if (-not (Test-Path -LiteralPath $pfad -PathType Leaf)) { Write-Warnung 'Datei nicht gefunden.'; return }
-
-    $zeilen = @(Import-CsvAuto $pfad)
-    if ($zeilen.Count -eq 0) { Write-Warnung 'Keine Datenzeilen gefunden.'; return }
-    $spalten = @($zeilen[0].PSObject.Properties.Name)
-    if ($spalten -notcontains 'Vorname' -or $spalten -notcontains 'Nachname') {
-        Write-Warnung "Spalten 'Vorname' und 'Nachname' fehlen (Trennzeichen ; oder ,)."
-        return
-    }
-
-    $ziele        = @(Get-ZielListe)
-    $gruppenCache = @{}
-    $standardZiel = $null
-    $vergeben     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $plaene       = [System.Collections.Generic.List[object]]::new()
-    $nr           = 1
-
-    foreach ($z in $zeilen) {
-        $nr++
-        $v = "$($z.Vorname)".Trim()
-        $n = "$($z.Nachname)".Trim()
-        if (-not $v -or -not $n) { Write-Warnung "Zeile ${nr}: Vor- oder Nachname fehlt - übersprungen."; continue }
-
-        $ouWert = "$($z.OU)".Trim()
-        if ($ouWert) {
-            $ziel = Resolve-OuWert $ouWert $ziele
-            if (-not $ziel) { Write-Warnung "Zeile ${nr}: OU '$ouWert' nicht gefunden oder nicht eindeutig - übersprungen."; continue }
-        }
-        else {
-            if (-not $standardZiel) {
-                Write-Info 'Mindestens eine Zeile hat keine OU angegeben.'
-                $standardZiel = Select-AdZiel 'Benutzer ohne OU-Angabe'
-            }
-            $ziel = $standardZiel
-        }
-
-        $sam = "$($z.Anmeldename)".Trim()
-        if ($sam) {
-            if ($sam.Length -gt 20 -or $sam -match '["/\\\[\]:;|=,+*?<>\s]' -or $vergeben.Contains($sam) -or (Test-SamVorhanden $sam)) {
-                Write-Warnung "Zeile ${nr}: Anmeldename '$sam' ungültig oder vergeben - übersprungen."
-                continue
-            }
-        }
-        else { $sam = Get-FreierAnmeldename $v $n $vergeben }
-
-        $pw = "$($z.Passwort)"
-        if ($pw) {
-            $problem = Test-PasswortRichtlinie $pw
-            if ($problem) { Write-Warnung "Zeile ${nr} ($sam): $problem - übersprungen."; continue }
-        }
-
-        $p = New-BenutzerPlan $v $n $ziel
-        Set-PlanAnmeldename $p $sam $vergeben
-        if ($pw) { $p.Passwort = ConvertTo-SecureString $pw -AsPlainText -Force; $p.PasswortArt = 'aus CSV' }
-        if ("$($z.Abteilung)".Trim()) { $p.Abteilung = "$($z.Abteilung)".Trim() }
-        foreach ($g in ("$($z.Gruppen)" -split '[|,]')) {
-            $g = $g.Trim()
-            if (-not $g) { continue }
-            $dn = Resolve-GruppeName $g $gruppenCache
-            if ($dn) { $p.Gruppen.Add($dn) } else { Write-Warnung "Zeile ${nr}: Gruppe '$g' nicht gefunden - wird ignoriert." }
-        }
-        $plaene.Add($p)
-    }
-
-    if ($plaene.Count -eq 0) { Write-Warnung 'Keine gültigen Zeilen.'; return }
-    Write-Ok "$($plaene.Count) Benutzer aus der CSV vorbereitet."
-
-    $ohnePw     = @($plaene | Where-Object { -not $_.Passwort })
-    $modus      = ''
-    $gleichesPw = $null
-    if ($ohnePw.Count) {
-        Write-Info "$($ohnePw.Count) Benutzer haben kein Passwort in der CSV."
-        $modus = Select-PasswortModus $ohnePw.Count
-        if ($modus -eq 'Gleich') { $gleichesPw = Read-Passwort 'alle ohne CSV-Passwort' }
-    }
-    Complete-BenutzerAnlage -Plaene $plaene.ToArray() -PwModus $modus -GleichesPw $gleichesPw
-}
-
-function New-CsvVorlage {
-    Write-Titel 'CSV-Vorlage erstellen'
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    if (-not $desktop) { $desktop = [Environment]::GetFolderPath('MyDocuments') }
-    if (-not $desktop) { $desktop = (Get-Location).ProviderPath }
-    $pfad = (Read-Text 'Speichern unter' (Join-Path $desktop 'Benutzer-Import.csv')).Trim('"')
-    if ((Test-Path -LiteralPath $pfad) -and -not (Read-JaNein 'Datei existiert schon. Überschreiben?' $false)) { Stop-Aktion }
-    $beispiel = @(
-        [pscustomobject]@{ Vorname = 'Max';  Nachname = 'Muster';   Anmeldename = '';           Passwort = ''; OU = 'Firma/Buchhaltung'; Abteilung = 'Buchhaltung'; Gruppen = "$($PrefixGG)Buchhaltung" }
-        [pscustomobject]@{ Vorname = 'Anna'; Nachname = 'Beispiel'; Anmeldename = 'a.beispiel'; Passwort = ''; OU = '';                  Abteilung = '';            Gruppen = "$($PrefixGG)Alle|$($PrefixGG)Vertrieb" }
-    )
-    try {
-        $beispiel | Export-Csv -LiteralPath $pfad -NoTypeInformation -Delimiter ';' -Encoding UTF8 -ErrorAction Stop
-        Write-Ok "Vorlage gespeichert: $pfad"
-        Write-Info 'Leere Felder = automatisch: Anmeldename nach Muster, OU wird gefragt, Passwort-Art wird gefragt.'
-    }
-    catch { Write-Warnung "Speichern fehlgeschlagen: $($_.Exception.Message)" }
-}
-#endregion
-
-#region ======================= MODUL [4] + [5] GRUPPEN ==============
+#region ======================= MODUL [3] + [4] GRUPPEN ==============
 
 function Start-GlobaleGruppen {
     Write-Titel "Globale Gruppe(n) erstellen   ($PrefixGG<Name>)"
@@ -1202,7 +1060,7 @@ function Start-DLGruppen {
 }
 #endregion
 
-#region ======================= MODUL [6] AGDLP ======================
+#region ======================= MODUL [5] AGDLP ======================
 
 function Start-AGDLP {
     Write-Titel 'AGDLP-Paket   (GG + DL + Verschachtelung + Ordnerrechte)'
@@ -1235,7 +1093,7 @@ function Start-AGDLP {
 }
 #endregion
 
-#region ======================= MODUL [7] ABTEILUNG ==================
+#region ======================= MODUL [6] ABTEILUNG ==================
 
 function Start-Abteilung {
     Write-Titel 'Abteilung komplett anlegen'
@@ -1282,7 +1140,7 @@ function Start-Abteilung {
 }
 #endregion
 
-#region ======================= MODUL [8] MITGLIEDSCHAFTEN ===========
+#region ======================= MODUL [7] MITGLIEDSCHAFTEN ===========
 
 function Start-Mitgliedschaften {
     Write-Titel 'Mitglieder zu Gruppen hinzufügen'
@@ -1296,7 +1154,7 @@ function Start-Mitgliedschaften {
 }
 #endregion
 
-#region ======================= MODUL [9] RÜCKGÄNGIG =================
+#region ======================= MODUL [8] RÜCKGÄNGIG =================
 
 function Start-Rueckgaengig {
     Write-Titel 'Rückgängig machen (aus Protokoll)'
@@ -1464,6 +1322,70 @@ function Resolve-DnsZielName([string]$Ziel, [string]$Zone) {
     if ($z -eq '@') { return "$zoneNorm." }
     if ($z.Contains('.')) { return $z.TrimEnd('.') + '.' }
     return "$z.$zoneNorm."
+}
+
+# HostName eines Server-Eintrags (immer relativ zur Zone, auch mit Punkt: gc._msdcs) -> vollständiger Name
+function Get-DnsFqdn([string]$HostName, [string]$Zone) {
+    $zoneNorm = "$Zone".Trim().TrimEnd('.').ToLower()
+    $h = "$HostName".Trim().TrimEnd('.').ToLower()
+    if (-not $h -or $h -eq '@') { return "$zoneNorm." }
+    return "$h.$zoneNorm."
+}
+
+# Dienst-Name: ein Namensteil beginnt mit _ (z.B. gc._msdcs, _ldap._tcp) -> nie PTR-Ziel
+function Test-DnsDienstName([string]$HostName) {
+    return [bool](@("$HostName".Split('.') | Where-Object { $_.StartsWith('_') }).Count)
+}
+
+# Rang als PTR-Ziel: 0 = echter Hostname, 1 = @ / DomainDnsZones / ForestDnsZones, 2 = Dienst-Name
+function Get-DnsPtrRang([string]$HostName) {
+    if (Test-DnsDienstName $HostName) { return 2 }
+    if ("$HostName" -in '@', 'DomainDnsZones', 'ForestDnsZones') { return 1 }
+    return 0
+}
+
+# A/AAAA-Kandidaten (Zone, HostName, Ip) aus allen Zonen global sortieren; pro Reverse-Name gewinnt
+# der erste. Rückgabe: MitZone (Reverse-Zone vorhanden), OhneZone (mit Vorschlag), NurDienst (kein PTR)
+function Select-DnsPtrKandidaten([object[]]$Kandidaten, [string[]]$ReverseZonen) {
+    $mitZone   = [System.Collections.Generic.List[object]]::new()
+    $ohneZone  = [System.Collections.Generic.List[object]]::new()
+    $nurDienst = [System.Collections.Generic.List[object]]::new()
+    $gesehen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $liste = @($Kandidaten | Where-Object { $_ } | ForEach-Object {
+        [pscustomobject]@{ Fqdn = (Get-DnsFqdn $_.HostName $_.Zone); Rang = (Get-DnsPtrRang $_.HostName); Ziel = (Get-PtrZielFuerIp $_.Ip $ReverseZonen) }
+    } | Where-Object { -not $_.Ziel.Fehler } | Sort-Object Rang, Fqdn)
+    foreach ($k in $liste) {
+        # Dienst-Namen stehen zuletzt: kommt eine IP erst hier vor, hat sie nur Dienst-Namen
+        if (-not $gesehen.Add($k.Ziel.VollName)) { continue }
+        $eintrag = [pscustomobject]@{
+            Ip = $k.Ziel.Ip; Fqdn = $k.Fqdn; Zone = $k.Ziel.Zone; Name = $k.Ziel.Name
+            VorschlagNetz = $k.Ziel.VorschlagNetz; VorschlagZone = $k.Ziel.VorschlagZone
+        }
+        if ($k.Rang -eq 2)    { $nurDienst.Add($eintrag) }
+        elseif ($k.Ziel.Zone) { $mitZone.Add($eintrag) }
+        else                  { $ohneZone.Add($eintrag) }
+    }
+    return [pscustomobject]@{ MitZone = $mitZone.ToArray(); OhneZone = $ohneZone.ToArray(); NurDienst = $nurDienst.ToArray() }
+}
+
+# Adressen ohne Reverse-Zone nach vorgeschlagenem Netz (/24) gruppieren, sortiert nach Netz.
+# Ohne Vorschlag (IPv6) fallen sie weg. Je Netz: Anzeige, Netz, Zone, Adressen
+function Group-DnsOhneZoneNachNetz([object[]]$OhneZone) {
+    $liste = foreach ($g in @($OhneZone | Where-Object { $_ -and $_.VorschlagNetz } | Group-Object VorschlagNetz)) {
+        $adressen = @($g.Group)
+        $namen    = @($adressen | ForEach-Object { $_.Fqdn } | Select-Object -Unique)
+        $text     = (@($namen | Select-Object -First 3) -join ', ') + $(if ($namen.Count -gt 3) { ', …' } else { '' })
+        $wort     = if ($adressen.Count -eq 1) { 'Adresse' } else { 'Adressen' }
+        $o        = $g.Name.Split('/')[0].Split('.')
+        [pscustomobject]@{
+            Anzeige  = '{0,-18} ->  {1,-26} ({2} {3}: {4})' -f $g.Name, $adressen[0].VorschlagZone, $adressen.Count, $wort, $text
+            Netz     = $g.Name
+            Zone     = $adressen[0].VorschlagZone
+            Adressen = $adressen
+            Sortierung = [int64]$o[0] * 16777216 + [int64]$o[1] * 65536 + [int64]$o[2] * 256
+        }
+    }
+    return @($liste | Sort-Object Sortierung | Select-Object Anzeige, Netz, Zone, Adressen)
 }
 
 # Vergleichs- und Protokolltext "<Typ>|<Daten>" (MX: "MX|<Ziel>|<Priorität>"), normalisiert
@@ -2029,7 +1951,7 @@ function Start-DnsEintraege {
                 $ziel = Get-PtrZielFuerIp $p.Daten ($reverse + @($neueZonen | ForEach-Object { $_.Zone }))
             }
             if (-not $ziel.Zone) { $ohne.Add($p.Daten); continue }
-            $fqdn = Resolve-DnsZielName $p.Name $zone
+            $fqdn = Get-DnsFqdn $p.Name $zone
             if ($neueZonen | Where-Object { $_.Zone -eq $ziel.Zone }) {
                 $plaene.Add([pscustomobject]@{ Zone = $ziel.Zone; Typ = 'PTR'; Name = $ziel.Name; Daten = $fqdn; Prioritaet = ''; Art = 'Neu'; Grund = '' })
             }
@@ -2059,6 +1981,78 @@ function Start-DnsEintraege {
     }
 }
 
+# [D][6] Sucht A/AAAA-Einträge der Zonen ohne PTR. Rückgabe: Plaene (fehlende PTR-Einträge),
+# OhneZone (keine Reverse-Zone, mit VorschlagNetz/VorschlagZone), NurDienst (nur Dienst-Namen)
+function Get-DnsFehlendePtr {
+    param([string[]]$Zonen, [string[]]$ReverseZonen = @())
+    $dns        = Get-DnsParameter
+    $kandidaten = [System.Collections.Generic.List[object]]::new()
+    foreach ($zone in $Zonen) {
+        foreach ($rr in @('A', 'AAAA' | ForEach-Object { Get-DnsServerResourceRecord -ZoneName $zone -RRType $_ @dns -ErrorAction SilentlyContinue })) {
+            $r = ConvertFrom-DnsRecord $rr
+            $kandidaten.Add([pscustomobject]@{ Zone = $zone; HostName = $r.Name; Ip = $r.Daten })
+        }
+    }
+    # global sortiert: echte Hostnamen zuerst, @/DomainDnsZones/ForestDnsZones danach, Dienst-Namen nie
+    $auswahl = Select-DnsPtrKandidaten $kandidaten.ToArray() $ReverseZonen
+    $plaene  = [System.Collections.Generic.List[object]]::new()
+    foreach ($k in $auswahl.MitZone) {
+        $ptr = @(Get-DnsServerResourceRecord -ZoneName $k.Zone -Name $k.Name -RRType Ptr @dns -ErrorAction SilentlyContinue |
+                 Where-Object { "$($_.HostName)" -eq $k.Name })
+        if ($ptr.Count) { continue }
+        $plaene.Add([pscustomobject]@{ Zone = $k.Zone; Typ = 'PTR'; Name = $k.Name; Daten = $k.Fqdn; Prioritaet = ''; Art = 'Neu'; Grund = '' })
+    }
+    return [pscustomobject]@{ Plaene = $plaene.ToArray(); OhneZone = $auswahl.OhneZone; NurDienst = $auswahl.NurDienst }
+}
+
+# [D][6] Reverse-Zonen für Adressen ohne Zone anlegen (Auswahl je /24-Netz, anpassbar).
+# $true = mindestens eine Zone ist jetzt da (neu oder schon vorhanden)
+function Invoke-DnsReverseZonenFuerPtr([object[]]$OhneZone) {
+    foreach ($o in @($OhneZone | Where-Object { -not $_.VorschlagNetz })) {
+        Write-Info "Reverse-Zone für IPv6 bitte von Hand anlegen: $($o.Ip) ($($o.Fqdn))"
+    }
+    $netze = @(Group-DnsOhneZoneNachNetz $OhneZone)
+    if ($netze.Count -eq 0) { return $false }
+    $eintraege = @([pscustomobject]@{ Anzeige = '(alle)'; Netz = '*'; Zone = ''; Adressen = @() }) + $netze
+    $wahl = @(Select-AusListe -Eintraege $eintraege -Titel 'Für welche Netze Reverse-Zonen erstellen?' -Mehrfach -Optional)
+    if ($wahl.Count -eq 0) { Write-Info 'Kein Netz gewählt - es werden keine Zonen angelegt.'; return $false }
+    if (@($wahl | Where-Object { $_.Netz -eq '*' }).Count) { $wahl = $netze }
+
+    $anpassen = Read-JaNein 'Netze anpassen (z. B. /16 statt /24)?' $false
+    $neu = [System.Collections.Generic.List[object]]::new()
+    foreach ($n in $wahl) {
+        $r = ConvertTo-ReverseZonenName $n.Netz
+        if ($anpassen) {
+            $ips = @($n.Adressen | ForEach-Object { $_.Ip })
+            while ($true) {
+                $antwort = Read-Text "Netz für $($ips -join ', ') ('-' = weglassen)" $n.Netz
+                if ($antwort -eq '-') { $r = $null; break }
+                $r = ConvertTo-ReverseZonenName $antwort
+                if ($r.Fehler) { Write-Warnung $r.Fehler; continue }
+                $draussen = @($ips | Where-Object { -not (Get-PtrZielFuerIp $_ @($r.Zone)).Zone })
+                if ($draussen.Count) { Write-Warnung "$($draussen -join ', ') liegt nicht in $($r.NetworkId)."; continue }
+                break
+            }
+        }
+        if ($r -and -not @($neu | Where-Object { $_.Zone -eq $r.Zone }).Count) { $neu.Add($r) }
+    }
+    if ($neu.Count -eq 0) { Write-Info 'Kein Netz übrig - es werden keine Zonen angelegt.'; return $false }
+
+    $optionen = Read-DnsZonenOptionen
+    if ($Funktionen.Vorschau) {
+        $art = if ($optionen.AdIntegriert) { "AD-integriert ($DnsReplikation)" } else { 'Datei' }
+        Write-Info "Wird erstellt ($art, dynamische Updates: $($optionen.DynamicUpdate)):"
+        foreach ($r in $neu) { Write-Host ('    {0,-20} ->  {1}' -f $r.NetworkId, $r.Zone) -ForegroundColor White }
+        if (-not (Read-JaNein "$($neu.Count) Reverse-Zone(n) jetzt erstellen?" $true)) { Write-Info 'Es werden keine Zonen angelegt.'; return $false }
+    }
+    $fehlgeschlagen = @()
+    foreach ($r in $neu) {
+        if (-not (New-DnsZone -Zone $r.Zone -NetworkId $r.NetworkId -Optionen $optionen)) { $fehlgeschlagen += $r.Zone }
+    }
+    if ($fehlgeschlagen.Count) { Write-Warnung "Nicht angelegt: $($fehlgeschlagen -join ', ') - dort gibt es keine PTR-Einträge." }
+    return ($fehlgeschlagen.Count -lt $neu.Count)
+}
+
 # [D][6]
 function Start-DnsPtrAuffuellen {
     Write-Titel 'Fehlende PTR-Einträge auffüllen'
@@ -2070,31 +2064,31 @@ function Start-DnsPtrAuffuellen {
     if ($wahl.Count -eq 0) { Stop-Aktion }
     $zonen = if ($wahl[0].Zone -eq '*') { @($forward | ForEach-Object { $_.ZoneName }) } else { @($wahl[0].Zone) }
 
-    $dns     = Get-DnsParameter
     $reverse = @(Get-DnsZonen -Reverse | ForEach-Object { $_.ZoneName })
-    $plaene  = [System.Collections.Generic.List[object]]::new()
-    $ohne    = [System.Collections.Generic.List[string]]::new()
-    $gesehen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($zone in $zonen) {
-        $adressen = @('A', 'AAAA' | ForEach-Object { Get-DnsServerResourceRecord -ZoneName $zone -RRType $_ @dns -ErrorAction SilentlyContinue })
-        # echte Hostnamen zuerst, Zonenstamm und DomainDnsZones/ForestDnsZones zuletzt
-        $adressen = @($adressen | Sort-Object { if ("$($_.HostName)" -in '@', 'DomainDnsZones', 'ForestDnsZones') { 1 } else { 0 } }, HostName)
-        foreach ($rr in $adressen) {
-            $r    = ConvertFrom-DnsRecord $rr
-            $ziel = Get-PtrZielFuerIp $r.Daten $reverse
-            if (-not $ziel.Zone) { if ($gesehen.Add("ohne|$($r.Daten)")) { $ohne.Add("$($r.Daten) ($(Resolve-DnsZielName $r.Name $zone))") }; continue }
-            if (-not $gesehen.Add("$($ziel.Zone)|$($ziel.Name)")) { continue }
-            $ptr = @(Get-DnsServerResourceRecord -ZoneName $ziel.Zone -Name $ziel.Name -RRType Ptr @dns -ErrorAction SilentlyContinue |
-                     Where-Object { "$($_.HostName)" -eq $ziel.Name })
-            if ($ptr.Count) { continue }
-            $plaene.Add([pscustomobject]@{ Zone = $ziel.Zone; Typ = 'PTR'; Name = $ziel.Name; Daten = (Resolve-DnsZielName $r.Name $zone); Prioritaet = ''; Art = 'Neu'; Grund = '' })
+    $suche   = Get-DnsFehlendePtr -Zonen $zonen -ReverseZonen $reverse
+    if ($suche.NurDienst.Count) {
+        Write-Info "Nur Dienst-Namen - kein PTR ($($suche.NurDienst.Count) Adresse(n)):"
+        foreach ($o in $suche.NurDienst) { Write-Info "  $($o.Ip) ($($o.Fqdn))" }
+    }
+    if ($suche.OhneZone.Count) {
+        $hinweis = if ($Funktionen.DnsZonen) { '' } else { ' - unter [4] anlegen' }
+        Write-Warnung "Keine passende Reverse-Zone für $($suche.OhneZone.Count) Adresse(n)${hinweis}:"
+        foreach ($o in $suche.OhneZone) { Write-Info "  $($o.Ip) ($($o.Fqdn))" }
+        if ($Funktionen.DnsZonen -and (Read-JaNein 'Passende Reverse-Zone(n) jetzt erstellen?' $true)) {
+            if (Invoke-DnsReverseZonenFuerPtr $suche.OhneZone) {
+                # neu suchen: die PTR-Einträge für die neuen Zonen sind damit automatisch geplant
+                $reverse = @(Get-DnsZonen -Reverse | ForEach-Object { $_.ZoneName })
+                $suche   = Get-DnsFehlendePtr -Zonen $zonen -ReverseZonen $reverse
+                if ($suche.OhneZone.Count) { Write-Info "Weiterhin ohne Reverse-Zone: $($suche.OhneZone.Count) Adresse(n)." }
+            }
         }
     }
-    if ($ohne.Count) {
-        Write-Warnung "Keine passende Reverse-Zone für $($ohne.Count) Adresse(n) - unter [4] anlegen:"
-        foreach ($o in $ohne) { Write-Info "  $o" }
+    $plaene = @($suche.Plaene)
+    if ($plaene.Count -eq 0) {
+        if ($suche.OhneZone.Count) { Write-Info 'Keine PTR-Einträge zu erstellen: Adressen mit Reverse-Zone haben schon einen PTR, die übrigen haben keine Reverse-Zone.' }
+        else { Write-Ok 'Alle Adressen mit Reverse-Zone haben schon einen PTR-Eintrag.' }
+        return
     }
-    if ($plaene.Count -eq 0) { Write-Ok 'Alle Adressen mit Reverse-Zone haben schon einen PTR-Eintrag.'; return }
     Write-Info "Fehlende PTR-Einträge: $($plaene.Count)"
     foreach ($p in $plaene) { Write-DnsPlanZeile $p }
     if (-not (Read-JaNein 'Diese PTR-Einträge jetzt erstellen?' $true)) { Stop-Aktion }
@@ -2157,6 +2151,154 @@ function Start-DnsTest {
 }
 #endregion
 
+#region ======================= MODUL [S] SUBNETZRECHNER ============
+# Reiner IPv4-Rechner: braucht weder AD noch DNS und ändert nichts am Server.
+
+# "192.168.8.0" -> Zahl (ungültig -> $null)
+function ConvertTo-IpZahl([string]$Text) {
+    if ((Get-IpArt $Text) -ne 'IPv4') { return $null }
+    [int64]$zahl = 0
+    foreach ($oktett in "$Text".Trim().Split('.')) { $zahl = $zahl * 256 + [int64]$oktett }
+    return $zahl
+}
+
+# Zahl -> die 4 Oktette
+function Get-IpOktette([int64]$Zahl) {
+    return @((($Zahl -shr 24) -band 255), (($Zahl -shr 16) -band 255), (($Zahl -shr 8) -band 255), ($Zahl -band 255))
+}
+
+# Zahl -> "192.168.8.0"
+function ConvertTo-IpText([int64]$Zahl) {
+    return (Get-IpOktette $Zahl) -join '.'
+}
+
+# Zahl -> "11111111.11111111.11111100.00000000"
+function ConvertTo-IpBinaer([int64]$Zahl) {
+    return (@(Get-IpOktette $Zahl | ForEach-Object { [Convert]::ToString([int]$_, 2).PadLeft(8, '0') }) -join '.')
+}
+
+# Präfix (z.B. 22) -> Maske als Zahl
+function Get-MaskeAusPraefix([int]$Praefix) {
+    return ([int64]4294967296 - ([int64]1 -shl (32 - $Praefix)))
+}
+
+# Maske "255.255.252.0", "255.255.252" (Rest wird mit 0 aufgefüllt), "/22" oder "22" -> Präfix (ungültig -> $null)
+function Get-PraefixAusEingabe([string]$Eingabe) {
+    $e = "$Eingabe".Trim()
+    if ($e -match '^/?\d{1,2}$') {
+        $p = [int]$e.TrimStart('/')
+        if ($p -le 32) { return $p }
+        return $null
+    }
+    $teile = @($e.Split('.') | Where-Object { $_ -ne '' })
+    if ($teile.Count -lt 1 -or $teile.Count -gt 4) { return $null }
+    while ($teile.Count -lt 4) { $teile += '0' }
+    $zahl = ConvertTo-IpZahl ($teile -join '.')
+    if ($null -eq $zahl) { return $null }
+    # welches Präfix ergibt genau diese Maske? (255.255.253.0 ist keine gültige Maske)
+    for ($p = 0; $p -le 32; $p++) { if ((Get-MaskeAusPraefix $p) -eq $zahl) { return $p } }
+    return $null
+}
+
+# Eingabe "/22", "255.255.252.0", "192.168.10.37/26" oder "192.168.10.37 255.255.255.192"
+# -> Ip (Zahl, $null = nicht angegeben) und Praefix ($null = ungültig)
+function ConvertFrom-SubnetzEingabe([string]$Text) {
+    $e = [pscustomobject]@{ Ip = $null; Praefix = $null }
+    $teile = @(("$Text".Trim() -replace '\s*/\s*', ' /') -split '\s+' | Where-Object { $_ })
+    if ($teile.Count -eq 1) { $e.Praefix = Get-PraefixAusEingabe $teile[0] }
+    elseif ($teile.Count -eq 2 -and (Get-IpArt $teile[0]) -eq 'IPv4') {
+        $e.Praefix = Get-PraefixAusEingabe $teile[1]
+        if ($null -ne $e.Praefix) { $e.Ip = ConvertTo-IpZahl $teile[0] }
+    }
+    return $e
+}
+
+# Alles zu IP + Präfix berechnen (ohne Ausgabe)
+function Get-SubnetzInfo([int64]$Ip, [int]$Praefix) {
+    $maske     = Get-MaskeAusPraefix $Praefix
+    $hostBits  = 32 - $Praefix
+    $adressen  = [int64]1 -shl $hostBits
+    $netz      = $Ip - ($Ip % $adressen)
+    $broadcast = $netz + $adressen - 1
+    if ($Praefix -le 30) {
+        $hosts = $adressen - 2; $erster = $netz + 1; $letzter = $broadcast - 1
+        $formel = "(2^$hostBits - 2)"; $hinweis = ''
+    }
+    elseif ($Praefix -eq 31) {
+        $hosts = 2; $erster = $netz; $letzter = $broadcast
+        $formel = ''; $hinweis = 'Sonderfall /31: Punkt-zu-Punkt-Verbindung (RFC 3021), nichts reserviert.'
+    }
+    else {
+        $hosts = 1; $erster = $netz; $letzter = $netz
+        $formel = ''; $hinweis = 'Sonderfall /32: genau eine einzelne Adresse, nichts reserviert.'
+    }
+    return [pscustomobject]@{
+        Ip          = ConvertTo-IpText $Ip
+        Praefix     = $Praefix
+        Maske       = ConvertTo-IpText $maske
+        Wildcard    = ConvertTo-IpText ($adressen - 1)
+        MaskeBinaer = ConvertTo-IpBinaer $maske
+        HostBits    = $hostBits
+        Netz        = ConvertTo-IpText $netz
+        Broadcast   = ConvertTo-IpText $broadcast
+        ErsterHost  = ConvertTo-IpText $erster
+        LetzterHost = ConvertTo-IpText $letzter
+        Hosts       = [int64]$hosts
+        Adressen    = $adressen
+        Formel      = $formel
+        Reserviert  = ($Praefix -le 30)    # Netz- und Broadcast-Adresse sind reserviert
+        Hinweis     = $hinweis
+    }
+}
+
+function Show-SubnetzInfo($Info) {
+    Write-Host ''
+    Write-Host '  Ergebnis' -ForegroundColor Cyan
+    Write-Info ('Eingegebene IP     : {0}' -f $Info.Ip)
+    Write-Info ('Subnetzmaske       : {0}' -f $Info.Maske)
+    Write-Host ('  CIDR-Schreibweise  : /{0}' -f $Info.Praefix) -ForegroundColor Yellow
+    Write-Info ('Wildcard-Maske     : {0}' -f $Info.Wildcard)
+    Write-Info ('Maske binär        : {0}' -f $Info.MaskeBinaer)
+    Write-Info ('Netz-/Host-Bits    : {0} / {1}' -f $Info.Praefix, $Info.HostBits)
+    Write-Host ''
+    Write-Host '  Reservierte Adressen' -ForegroundColor Cyan
+    if ($Info.Reserviert) {
+        Write-Info ('Netzadresse        : {0}' -f $Info.Netz)
+        Write-Info ('Broadcast-Adresse  : {0}' -f $Info.Broadcast)
+    }
+    else { Write-Info $Info.Hinweis }
+    Write-Host ''
+    Write-Host '  Hosts' -ForegroundColor Cyan
+    Write-Info ('Erster Host        : {0}' -f $Info.ErsterHost)
+    Write-Info ('Letzter Host       : {0}' -f $Info.LetzterHost)
+    Write-Ok   ('Nutzbare Hosts     : {0:N0}  {1}' -f $Info.Hosts, $Info.Formel)
+    Write-Info ('Adressen gesamt    : {0:N0}  (2^{1})' -f $Info.Adressen, $Info.HostBits)
+    Write-Host ''
+    Write-Host ('  Bereich            : {0}  bis  {1}' -f $Info.Netz, $Info.Broadcast) -ForegroundColor Yellow
+}
+
+# [S]
+function Start-Subnetzrechner {
+    Write-Titel 'Subnetzrechner'
+    Write-Info 'Maske als 255.255.252.0, 255.255.252 (Rest = 0) oder /22 - oder gleich mit IP: 192.168.10.37/26'
+    while ($true) {
+        $eingabe = Read-Text 'Subnetzmaske oder IP/Präfix (Enter = zurück)'
+        if (-not $eingabe) { return }
+        $e = ConvertFrom-SubnetzEingabe $eingabe
+        if ($null -eq $e.Praefix) {
+            Write-Warnung 'Ungültige Eingabe! Die Einsen der Maske müssen am Stück von links kommen (z.B. 255.255.252.0 oder /22), mit IP z.B. 192.168.10.37/26.'
+            continue
+        }
+        $ip = $e.Ip
+        while ($null -eq $ip) {
+            $ip = ConvertTo-IpZahl (Read-Text 'IP-Adresse im Netz' '192.168.0.0')
+            if ($null -eq $ip) { Write-Warnung 'Ungültige IP-Adresse! Beispiel: 192.168.8.0' }
+        }
+        Show-SubnetzInfo (Get-SubnetzInfo -Ip $ip -Praefix $e.Praefix)
+    }
+}
+#endregion
+
 #region ======================= EINSTELLUNGEN [E] ====================
 
 # Alle Werte, die unter [E] änderbar sind. Schluessel = Variablenname bzw. 'Tabelle.Schlüssel'
@@ -2197,10 +2339,10 @@ function Get-EinstellungsDefinitionen {
     & $neu $g 'DnsAutoPTR'         'PTR automatisch anlegen'    'Bool'
     & $neu $g 'DnsWeiterleitungen' 'Vorschlag Weiterleitungen'  'IPListe' "IP-Adressen mit Komma, '-' = keine"
     $texte = @{
-        OU = '[1] OUs erstellen'; Benutzer = '[2] Benutzer erstellen'; CsvImport = '[3] CSV-Import + [V] Vorlage'
-        GlobaleGruppen = '[4] Globale Gruppen'; DLGruppen = '[5] Domänenlokale Gruppen'; AGDLP = '[6] AGDLP-Paket'
-        Abteilung = '[7] Abteilung komplett'; Mitgliedschaften = '[8] Mitgliedschaften'; Rueckgaengig = '[9] Rückgängig'
-        DNS = '[D] DNS-Menü'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
+        OU = '[1] OUs erstellen'; Benutzer = '[2] Benutzer erstellen'
+        GlobaleGruppen = '[3] Globale Gruppen'; DLGruppen = '[4] Domänenlokale Gruppen'; AGDLP = '[5] AGDLP-Paket'
+        Abteilung = '[6] Abteilung komplett'; Mitgliedschaften = '[7] Mitgliedschaften'; Rueckgaengig = '[8] Rückgängig'
+        DNS = '[D] DNS-Menü'; Subnetzrechner = '[S] Subnetzrechner'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
         VorlageBenutzer = 'Benutzer: Vorlage kopieren'; GruppenZuweisen = 'Gruppen direkt zuweisen'
         AbteilungAusfuellen = 'Benutzer: Feld Abteilung'; EmailAusfuellen = 'Benutzer: E-Mail ausfüllen'
         HomeOrdner = 'Benutzer: Home-Ordner'; NTFSRechte = 'DL-Gruppen: NTFS-Rechte'; Freigabe = 'DL-Gruppen: SMB-Freigabe'
@@ -2376,8 +2518,11 @@ function ConvertFrom-EinstellungenJson([string]$Json, [object[]]$Definitionen) {
         $warnungen.Add('Einstellungen.json enthält kein JSON-Objekt { ... } - es gelten die Standardwerte.')
         return $ergebnis
     }
+    # Schlüssel aus älteren Versionen still ignorieren (fallen beim nächsten Speichern weg)
+    $veraltet = @('Funktionen.CsvImport')
     foreach ($p in $objekt.PSObject.Properties) {
         if ($p.Name.StartsWith('_')) { continue }   # Kommentare wie "_Hinweis"
+        if ($veraltet -contains $p.Name) { continue }
         $def = @($Definitionen | Where-Object { $_.Schluessel -eq $p.Name }) | Select-Object -First 1
         if (-not $def) { $warnungen.Add("Einstellungen.json: unbekannter Eintrag '$($p.Name)' - wird ignoriert."); continue }
         $pruefung = Test-EinstellungsWert $def $p.Value
@@ -2682,15 +2827,14 @@ function Get-Hauptmenue {
     return @(
         [pscustomobject]@{ Taste = '1'; Text = 'OUs erstellen (auch verschachtelt: Firma/Buchhaltung)';      An = $Funktionen.OU;               Braucht = @('AD'); Aktion = { Start-OUs } }
         [pscustomobject]@{ Taste = '2'; Text = 'Benutzer erstellen (einzeln oder Schnelleingabe)';           An = $Funktionen.Benutzer;         Braucht = @('AD'); Aktion = { Start-BenutzerAnlage } }
-        [pscustomobject]@{ Taste = '3'; Text = 'Benutzer aus CSV importieren';                               An = $Funktionen.CsvImport;        Braucht = @('AD'); Aktion = { Import-BenutzerCsv } }
-        [pscustomobject]@{ Taste = 'V'; Text = 'CSV-Vorlage erstellen';                                      An = $Funktionen.CsvImport;        Braucht = @();     Aktion = { New-CsvVorlage } }
-        [pscustomobject]@{ Taste = '4'; Text = "Globale Gruppen ($PrefixGG<Name>)";                          An = $Funktionen.GlobaleGruppen;   Braucht = @('AD'); Aktion = { Start-GlobaleGruppen } }
-        [pscustomobject]@{ Taste = '5'; Text = "Domänenlokale Gruppen + Rechte ($PrefixDL<Name>$TrennerRechte<Rechte>)"; An = $Funktionen.DLGruppen; Braucht = @('AD'); Aktion = { Start-DLGruppen } }
-        [pscustomobject]@{ Taste = '6'; Text = 'AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte';      An = $Funktionen.AGDLP;            Braucht = @('AD'); Aktion = { Start-AGDLP } }
-        [pscustomobject]@{ Taste = '7'; Text = 'Abteilung komplett: OU + Unter-OUs + Gruppen + Benutzer';    An = $Funktionen.Abteilung;        Braucht = @('AD'); Aktion = { Start-Abteilung } }
-        [pscustomobject]@{ Taste = '8'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
-        [pscustomobject]@{ Taste = '9'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
+        [pscustomobject]@{ Taste = '3'; Text = "Globale Gruppen ($PrefixGG<Name>)";                          An = $Funktionen.GlobaleGruppen;   Braucht = @('AD'); Aktion = { Start-GlobaleGruppen } }
+        [pscustomobject]@{ Taste = '4'; Text = "Domänenlokale Gruppen + Rechte ($PrefixDL<Name>$TrennerRechte<Rechte>)"; An = $Funktionen.DLGruppen; Braucht = @('AD'); Aktion = { Start-DLGruppen } }
+        [pscustomobject]@{ Taste = '5'; Text = 'AGDLP-Paket: GG + DL + Verschachtelung + Ordnerrechte';      An = $Funktionen.AGDLP;            Braucht = @('AD'); Aktion = { Start-AGDLP } }
+        [pscustomobject]@{ Taste = '6'; Text = 'Abteilung komplett: OU + Unter-OUs + Gruppen + Benutzer';    An = $Funktionen.Abteilung;        Braucht = @('AD'); Aktion = { Start-Abteilung } }
+        [pscustomobject]@{ Taste = '7'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
+        [pscustomobject]@{ Taste = '8'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
         [pscustomobject]@{ Taste = 'D'; Text = 'DNS: Zonen, Einträge, PTR, Weiterleitungen';                  An = $Funktionen.DNS;              Braucht = @();     Aktion = { Start-DnsMenue } }
+        [pscustomobject]@{ Taste = 'S'; Text = 'Subnetzrechner (IPv4: Netz, Broadcast, Hosts)';              An = $Funktionen.Subnetzrechner;   Braucht = @();     Aktion = { Start-Subnetzrechner } }
         [pscustomobject]@{ Taste = 'E'; Text = 'Einstellungen ansehen und ändern';                            An = $true;                        Braucht = @();     Aktion = { Start-Einstellungen } }
         [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }
     )
