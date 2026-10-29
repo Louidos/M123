@@ -126,6 +126,78 @@ Describe 'Get-PtrZielFuerIp' {
     }
 }
 
+Describe 'Get-DnsFqdn' {
+    It 'macht aus @ den Zonennamen' {
+        Get-DnsFqdn '@' 'lutefisk.local' | Should BeExactly 'lutefisk.local.'
+    }
+    It 'hängt die Zone an einfache Namen an, klein geschrieben' {
+        Get-DnsFqdn 'DC01' 'Lutefisk.Local' | Should BeExactly 'dc01.lutefisk.local.'
+    }
+    It 'behandelt einen Punkt im HostName als relativ zur Zone' {
+        Get-DnsFqdn 'gc._msdcs' 'lutefisk.local' | Should BeExactly 'gc._msdcs.lutefisk.local.'
+        Get-DnsFqdn 'srv01.sub' 'lutefisk.local' | Should BeExactly 'srv01.sub.lutefisk.local.'
+    }
+    It 'gibt mit und ohne Punkt am Zonenende dasselbe' {
+        Get-DnsFqdn 'dc01' 'lutefisk.local.' | Should BeExactly 'dc01.lutefisk.local.'
+        Get-DnsFqdn '@' 'lutefisk.local.' | Should BeExactly 'lutefisk.local.'
+    }
+}
+
+Describe 'Test-DnsDienstName / Get-DnsPtrRang' {
+    It 'erkennt Namen mit einem Teil, der mit _ beginnt' {
+        Test-DnsDienstName 'gc._msdcs' | Should Be $true
+        Test-DnsDienstName '_ldap._tcp' | Should Be $true
+        Test-DnsDienstName 'dc01' | Should Be $false
+        Test-DnsDienstName 'srv_01' | Should Be $false
+    }
+    It 'sortiert echte Hostnamen vor @/DomainDnsZones und Dienst-Namen' {
+        Get-DnsPtrRang 'dc01' | Should Be 0
+        Get-DnsPtrRang '@' | Should Be 1
+        Get-DnsPtrRang 'DomainDnsZones' | Should Be 1
+        Get-DnsPtrRang 'ForestDnsZones' | Should Be 1
+        Get-DnsPtrRang 'gc._msdcs' | Should Be 2
+    }
+}
+
+Describe 'Select-DnsPtrKandidaten' {
+    $k = { param($Zone, $HostName, $Ip) [pscustomobject]@{ Zone = $Zone; HostName = $HostName; Ip = $Ip } }
+    $kandidaten = @(
+        (& $k 'lutefisk.local' '@'              '192.168.10.10')
+        (& $k 'lutefisk.local' 'gc._msdcs'      '192.168.10.10')
+        (& $k 'lutefisk.local' 'DomainDnsZones' '192.168.10.10')
+        (& $k 'b.local'        'dc01'           '192.168.10.10')
+        (& $k 'lutefisk.local' 'gc._msdcs'      '192.168.8.10')
+        (& $k 'lutefisk.local' '@'              '192.168.9.10')
+        (& $k 'lutefisk.local' 'srv02'          '192.168.9.10')
+    )
+    $r = Select-DnsPtrKandidaten $kandidaten @('10.168.192.in-addr.arpa')
+
+    It 'nimmt zonenübergreifend den echten Hostnamen' {
+        @($r.MitZone).Count | Should Be 1
+        $r.MitZone[0].Fqdn | Should BeExactly 'dc01.b.local.'
+        $r.MitZone[0].Zone | Should Be '10.168.192.in-addr.arpa'
+        $r.MitZone[0].Name | Should Be '10'
+    }
+    It 'zeigt Adressen ohne Reverse-Zone mit vollständigem Namen und Vorschlag' {
+        @($r.OhneZone).Count | Should Be 1
+        $r.OhneZone[0].Ip | Should Be '192.168.9.10'
+        $r.OhneZone[0].Fqdn | Should BeExactly 'srv02.lutefisk.local.'
+        $r.OhneZone[0].VorschlagNetz | Should Be '192.168.9.0/24'
+        $r.OhneZone[0].VorschlagZone | Should Be '9.168.192.in-addr.arpa'
+    }
+    It 'plant für Dienst-Namen keinen PTR und meldet IPs mit nur Dienst-Namen separat' {
+        @($r.MitZone + $r.OhneZone | Where-Object { $_.Fqdn -like '*_msdcs*' }).Count | Should Be 0
+        @($r.NurDienst).Count | Should Be 1
+        $r.NurDienst[0].Ip | Should Be '192.168.8.10'
+        $r.NurDienst[0].Fqdn | Should BeExactly 'gc._msdcs.lutefisk.local.'
+    }
+    It 'nimmt @ nur, wenn es keinen echten Hostnamen gibt' {
+        $r2 = Select-DnsPtrKandidaten @((& $k 'lutefisk.local' 'gc._msdcs' '192.168.10.10'), (& $k 'lutefisk.local' '@' '192.168.10.10')) @('10.168.192.in-addr.arpa')
+        $r2.MitZone[0].Fqdn | Should BeExactly 'lutefisk.local.'
+        @($r2.NurDienst).Count | Should Be 0
+    }
+}
+
 Describe 'ConvertFrom-DnsSchnelleingabe' {
     $zone = 'firma.local'
 

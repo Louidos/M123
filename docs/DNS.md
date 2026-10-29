@@ -108,9 +108,16 @@ Ein zweiter Lauf mit derselben Eingabe zeigt alles als `VORHANDEN`.
 ## [6] Fehlende PTR auffüllen
 
 Geht alle A/AAAA-Einträge einer oder aller Forward-Zonen durch. Für jede Adresse ohne PTR
-in einer vorhandenen Reverse-Zone wird ein PTR geplant (pro IP nur einer; echte Hostnamen
-haben Vorrang vor `@`, `DomainDnsZones`, `ForestDnsZones`). Erst Vorschau-Liste, dann
-Bestätigung. Adressen ohne passende Reverse-Zone werden gesammelt gemeldet.
+in einer vorhandenen Reverse-Zone wird ein PTR geplant. Pro IP nur einer: Die Namen aus allen
+gewählten Zonen werden gemeinsam sortiert, echte Hostnamen haben Vorrang vor `@`,
+`DomainDnsZones` und `ForestDnsZones`. Der PTR zeigt immer auf den vollständigen Namen,
+z. B. `dc01.lutefisk.local.`.
+
+Dienst-Namen (ein Namensteil beginnt mit `_`, z. B. `gc._msdcs`, `_ldap._tcp`) werden nie
+PTR-Ziel. Hat eine IP nur solche Namen, steht sie grau unter „Nur Dienst-Namen - kein PTR“.
+
+Erst Vorschau-Liste, dann Bestätigung. Adressen ohne passende Reverse-Zone werden gesammelt
+gemeldet (mit vollständigem Namen).
 
 ## [7] Weiterleitungen
 

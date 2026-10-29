@@ -1466,6 +1466,50 @@ function Resolve-DnsZielName([string]$Ziel, [string]$Zone) {
     return "$z.$zoneNorm."
 }
 
+# HostName eines Server-Eintrags (immer relativ zur Zone, auch mit Punkt: gc._msdcs) -> vollständiger Name
+function Get-DnsFqdn([string]$HostName, [string]$Zone) {
+    $zoneNorm = "$Zone".Trim().TrimEnd('.').ToLower()
+    $h = "$HostName".Trim().TrimEnd('.').ToLower()
+    if (-not $h -or $h -eq '@') { return "$zoneNorm." }
+    return "$h.$zoneNorm."
+}
+
+# Dienst-Name: ein Namensteil beginnt mit _ (z.B. gc._msdcs, _ldap._tcp) -> nie PTR-Ziel
+function Test-DnsDienstName([string]$HostName) {
+    return [bool](@("$HostName".Split('.') | Where-Object { $_.StartsWith('_') }).Count)
+}
+
+# Rang als PTR-Ziel: 0 = echter Hostname, 1 = @ / DomainDnsZones / ForestDnsZones, 2 = Dienst-Name
+function Get-DnsPtrRang([string]$HostName) {
+    if (Test-DnsDienstName $HostName) { return 2 }
+    if ("$HostName" -in '@', 'DomainDnsZones', 'ForestDnsZones') { return 1 }
+    return 0
+}
+
+# A/AAAA-Kandidaten (Zone, HostName, Ip) aus allen Zonen global sortieren; pro Reverse-Name gewinnt
+# der erste. Rückgabe: MitZone (Reverse-Zone vorhanden), OhneZone (mit Vorschlag), NurDienst (kein PTR)
+function Select-DnsPtrKandidaten([object[]]$Kandidaten, [string[]]$ReverseZonen) {
+    $mitZone   = [System.Collections.Generic.List[object]]::new()
+    $ohneZone  = [System.Collections.Generic.List[object]]::new()
+    $nurDienst = [System.Collections.Generic.List[object]]::new()
+    $gesehen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $liste = @($Kandidaten | Where-Object { $_ } | ForEach-Object {
+        [pscustomobject]@{ Fqdn = (Get-DnsFqdn $_.HostName $_.Zone); Rang = (Get-DnsPtrRang $_.HostName); Ziel = (Get-PtrZielFuerIp $_.Ip $ReverseZonen) }
+    } | Where-Object { -not $_.Ziel.Fehler } | Sort-Object Rang, Fqdn)
+    foreach ($k in $liste) {
+        # Dienst-Namen stehen zuletzt: kommt eine IP erst hier vor, hat sie nur Dienst-Namen
+        if (-not $gesehen.Add($k.Ziel.VollName)) { continue }
+        $eintrag = [pscustomobject]@{
+            Ip = $k.Ziel.Ip; Fqdn = $k.Fqdn; Zone = $k.Ziel.Zone; Name = $k.Ziel.Name
+            VorschlagNetz = $k.Ziel.VorschlagNetz; VorschlagZone = $k.Ziel.VorschlagZone
+        }
+        if ($k.Rang -eq 2)    { $nurDienst.Add($eintrag) }
+        elseif ($k.Ziel.Zone) { $mitZone.Add($eintrag) }
+        else                  { $ohneZone.Add($eintrag) }
+    }
+    return [pscustomobject]@{ MitZone = $mitZone.ToArray(); OhneZone = $ohneZone.ToArray(); NurDienst = $nurDienst.ToArray() }
+}
+
 # Vergleichs- und Protokolltext "<Typ>|<Daten>" (MX: "MX|<Ziel>|<Priorität>"), normalisiert
 function Get-DnsBezug([string]$Typ, [string]$Daten, [string]$Prioritaet = '') {
     $t = $Typ.ToUpper()
@@ -2029,7 +2073,7 @@ function Start-DnsEintraege {
                 $ziel = Get-PtrZielFuerIp $p.Daten ($reverse + @($neueZonen | ForEach-Object { $_.Zone }))
             }
             if (-not $ziel.Zone) { $ohne.Add($p.Daten); continue }
-            $fqdn = Resolve-DnsZielName $p.Name $zone
+            $fqdn = Get-DnsFqdn $p.Name $zone
             if ($neueZonen | Where-Object { $_.Zone -eq $ziel.Zone }) {
                 $plaene.Add([pscustomobject]@{ Zone = $ziel.Zone; Typ = 'PTR'; Name = $ziel.Name; Daten = $fqdn; Prioritaet = ''; Art = 'Neu'; Grund = '' })
             }
@@ -2072,27 +2116,29 @@ function Start-DnsPtrAuffuellen {
 
     $dns     = Get-DnsParameter
     $reverse = @(Get-DnsZonen -Reverse | ForEach-Object { $_.ZoneName })
-    $plaene  = [System.Collections.Generic.List[object]]::new()
-    $ohne    = [System.Collections.Generic.List[string]]::new()
-    $gesehen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $kandidaten = [System.Collections.Generic.List[object]]::new()
     foreach ($zone in $zonen) {
-        $adressen = @('A', 'AAAA' | ForEach-Object { Get-DnsServerResourceRecord -ZoneName $zone -RRType $_ @dns -ErrorAction SilentlyContinue })
-        # echte Hostnamen zuerst, Zonenstamm und DomainDnsZones/ForestDnsZones zuletzt
-        $adressen = @($adressen | Sort-Object { if ("$($_.HostName)" -in '@', 'DomainDnsZones', 'ForestDnsZones') { 1 } else { 0 } }, HostName)
-        foreach ($rr in $adressen) {
-            $r    = ConvertFrom-DnsRecord $rr
-            $ziel = Get-PtrZielFuerIp $r.Daten $reverse
-            if (-not $ziel.Zone) { if ($gesehen.Add("ohne|$($r.Daten)")) { $ohne.Add("$($r.Daten) ($(Resolve-DnsZielName $r.Name $zone))") }; continue }
-            if (-not $gesehen.Add("$($ziel.Zone)|$($ziel.Name)")) { continue }
-            $ptr = @(Get-DnsServerResourceRecord -ZoneName $ziel.Zone -Name $ziel.Name -RRType Ptr @dns -ErrorAction SilentlyContinue |
-                     Where-Object { "$($_.HostName)" -eq $ziel.Name })
-            if ($ptr.Count) { continue }
-            $plaene.Add([pscustomobject]@{ Zone = $ziel.Zone; Typ = 'PTR'; Name = $ziel.Name; Daten = (Resolve-DnsZielName $r.Name $zone); Prioritaet = ''; Art = 'Neu'; Grund = '' })
+        foreach ($rr in @('A', 'AAAA' | ForEach-Object { Get-DnsServerResourceRecord -ZoneName $zone -RRType $_ @dns -ErrorAction SilentlyContinue })) {
+            $r = ConvertFrom-DnsRecord $rr
+            $kandidaten.Add([pscustomobject]@{ Zone = $zone; HostName = $r.Name; Ip = $r.Daten })
         }
     }
-    if ($ohne.Count) {
-        Write-Warnung "Keine passende Reverse-Zone für $($ohne.Count) Adresse(n) - unter [4] anlegen:"
-        foreach ($o in $ohne) { Write-Info "  $o" }
+    # global sortiert: echte Hostnamen zuerst, @/DomainDnsZones/ForestDnsZones danach, Dienst-Namen nie
+    $auswahl = Select-DnsPtrKandidaten $kandidaten.ToArray() $reverse
+    $plaene  = [System.Collections.Generic.List[object]]::new()
+    foreach ($k in $auswahl.MitZone) {
+        $ptr = @(Get-DnsServerResourceRecord -ZoneName $k.Zone -Name $k.Name -RRType Ptr @dns -ErrorAction SilentlyContinue |
+                 Where-Object { "$($_.HostName)" -eq $k.Name })
+        if ($ptr.Count) { continue }
+        $plaene.Add([pscustomobject]@{ Zone = $k.Zone; Typ = 'PTR'; Name = $k.Name; Daten = $k.Fqdn; Prioritaet = ''; Art = 'Neu'; Grund = '' })
+    }
+    if ($auswahl.NurDienst.Count) {
+        Write-Info "Nur Dienst-Namen - kein PTR ($($auswahl.NurDienst.Count) Adresse(n)):"
+        foreach ($o in $auswahl.NurDienst) { Write-Info "  $($o.Ip) ($($o.Fqdn))" }
+    }
+    if ($auswahl.OhneZone.Count) {
+        Write-Warnung "Keine passende Reverse-Zone für $($auswahl.OhneZone.Count) Adresse(n) - unter [4] anlegen:"
+        foreach ($o in $auswahl.OhneZone) { Write-Info "  $($o.Ip) ($($o.Fqdn))" }
     }
     if ($plaene.Count -eq 0) { Write-Ok 'Alle Adressen mit Reverse-Zone haben schon einen PTR-Eintrag.'; return }
     Write-Info "Fehlende PTR-Einträge: $($plaene.Count)"
