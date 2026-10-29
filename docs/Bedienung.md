@@ -36,12 +36,21 @@ Mit `$Funktionen` abgeschaltete Punkte sind wie bisher ganz ausgeblendet.
 Jede Sitzung schreibt ein CSV-Protokoll nach `AD-Schnellanlage-Protokolle\AD-Anlage_<Datum>.csv`
 neben dem Script (Spalten `Zeit;Typ;Name;Status;DN;Bezug;Info`).
 
+GPOs, Links und GPO-Einstellungen aus **[G]** werden nicht zurückgebaut, sondern nur
+aufgelistet – eine GPO entfernt man mit [G][6] (siehe [GPO.md](GPO.md)).
+
 [8] liest ein Protokoll und entfernt in dieser Reihenfolge: DNS-Einträge, DNS-Zonen (nur leere),
 Mitgliedschaften, Freigaben, Benutzer, Gruppen, OUs (nur leere). Details zu DNS: [DNS.md](DNS.md). Ordner, NTFS-Rechte und Home-Ordner werden **nicht**
 gelöscht, sondern nur aufgelistet.
 
 Zufallspasswörter werden als `Passwoerter_<Datum>.csv` im selben Ordner gespeichert –
 nach dem Verteilen löschen!
+
+## Gruppenrichtlinien [G]
+
+GPOs anlegen und verknüpfen, Netzlaufwerke (Group Policy Preferences) zuordnen und
+Standard-Richtlinien setzen. Braucht AD, das Modul `GroupPolicy` (Feature GPMC, unter [G]
+installierbar) und die Datei `Module\GPO.psm1` neben dem Script. Details: [GPO.md](GPO.md).
 
 ## Subnetzrechner [S]
 

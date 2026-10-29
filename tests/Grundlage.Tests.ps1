@@ -120,7 +120,7 @@ Describe 'Get-Hauptmenue' {
     $menue = @(Get-Hauptmenue)
 
     It 'enthält alle bisherigen Menüpunkte' {
-        (@($menue | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,4,5,6,7,8,D,S,E,P'
+        (@($menue | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,4,5,6,7,8,D,G,S,E,P'
     }
     It 'hat keinen CSV-Import und keine CSV-Vorlage mehr' {
         @($menue | Where-Object { $_.Taste -eq 'V' -or $_.Text -match 'CSV' }).Count | Should Be 0
@@ -133,6 +133,9 @@ Describe 'Get-Hauptmenue' {
         (@(($menue | Where-Object { $_.Taste -eq '8' }).Braucht) -join ',') | Should Be 'AD|DNS'
         @(($menue | Where-Object { $_.Taste -eq 'P' }).Braucht).Count | Should Be 0
         @(($menue | Where-Object { $_.Taste -eq 'S' }).Braucht).Count | Should Be 0
+    }
+    It 'verlangt für [G] AD und die Datei Module\GPO.psm1' {
+        (@(($menue | Where-Object { $_.Taste -eq 'G' }).Braucht) -join ',') | Should Be 'AD,GpoDatei'
     }
     It 'zeigt das aktuelle Präfix im Text' {
         $PrefixGG = 'GG-'

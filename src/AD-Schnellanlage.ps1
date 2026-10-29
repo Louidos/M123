@@ -5,9 +5,12 @@
 
 .DESCRIPTION
     Interaktives Menue fuer Windows Server.
-    Nutzt ausschliesslich Bordmittel: Module ActiveDirectory, DnsServer, ServerManager,
-    SmbShare, DnsClient, .NET und - wenn vorhanden - Out-GridView. Keine externen
-    Programme, kein Internet.
+    Nutzt ausschliesslich Bordmittel: Module ActiveDirectory, DnsServer, GroupPolicy,
+    ServerManager, SmbShare, DnsClient, .NET und - wenn vorhanden - Out-GridView. Keine
+    externen Programme, kein Internet.
+
+    Groessere Bereiche liegen als Teilmodule in Module\<Name>.psm1 neben dem Script
+    (GPO). Fehlt eine Datei, fehlt nur der zugehoerige Menuepunkt.
 
     Das Script prueft beim Start, was auf dem Server vorhanden ist (Active Directory,
     DNS-Rolle, SMB, Auswahlfenster, Adminrechte). Menuepunkte, die hier nicht laufen
@@ -26,6 +29,10 @@
           Schnelleingabe (srv01=192.168.10.5, www=srv01, @=MX:mail:10) mit
           automatischem PTR, fehlende PTR auffuellen (fehlende Reverse-Zonen dabei
           gleich anlegen), Weiterleitungen, Namensaufloesung
+      [G] Gruppenrichtlinien: GPO erstellen, Netzlaufwerk zuordnen (Laufwerkszuordnung
+          per Group Policy Preferences, optional nur fuer eine Gruppe), Standard-
+          Richtlinien (Systemsteuerung, Desktophintergrund, cmd, USB, Bildschirmsperre),
+          mit OU verknuepfen, anzeigen, entfernen
       [S] Subnetzrechner (IPv4): Maske, Netz, Broadcast, erster/letzter Host, Anzahl
           Hosts - braucht weder AD noch DNS
       [E] Einstellungen: Praefixe, Namensmuster, Benutzer-Standards, DNS und Module
@@ -110,6 +117,7 @@ $Funktionen = [ordered]@{
     Mitgliedschaften    = $true   # [7]
     Rueckgaengig        = $true   # [8] (braucht Protokoll)
     DNS                 = $true   # [D] DNS-Menü
+    GPO                 = $true   # [G] Gruppenrichtlinien-Menü (Teilmodul Module\GPO.psm1)
     Subnetzrechner      = $true   # [S] Subnetzrechner (braucht weder AD noch DNS)
     # Zusatzschritte in den Abläufen
     Schnelleingabe      = $true   # Benutzer: alle Namen in einer Zeile
@@ -1175,7 +1183,7 @@ function Start-Rueckgaengig {
     $adTypen = 'Mitglied', 'Benutzer', 'Gruppe', 'OU'
     $rueck   = @($daten | Where-Object { $typen -contains $_.Typ })
     $manuell = @($daten | Where-Object { $_.Typ -in 'Ordner', 'NTFS', 'Home' } | Select-Object -ExpandProperty DN -Unique)
-    $hinweis = @($daten | Where-Object { $_.Typ -in 'DNS-Rolle', 'DNS-Forwarder' })
+    $hinweis = @($daten | Where-Object { $_.Typ -in 'DNS-Rolle', 'DNS-Forwarder' -or $_.Typ -like 'GPO*' })
     if ($rueck.Count -eq 0) {
         Write-Warnung 'In diesem Protokoll gibt es nichts zum Rückgängigmachen.'
         foreach ($h in $hinweis) { Write-Info "Wird nicht zurückgebaut: $($h.Typ) $($h.Name)" }
@@ -1251,7 +1259,7 @@ function Start-Rueckgaengig {
         foreach ($m in $manuell) { Write-Info $m }
     }
     if ($hinweis.Count) {
-        Write-Warnung 'Nicht zurückgebaut (bei Bedarf von Hand): DNS-Rolle und Weiterleitungen'
+        Write-Warnung 'Nicht zurückgebaut (bei Bedarf von Hand bzw. GPOs unter [G] entfernen): Rollen, Weiterleitungen, Gruppenrichtlinien'
         foreach ($h in $hinweis) { Write-Info "$($h.Typ): $($h.Name)  $($h.Info)" }
     }
 }
@@ -2344,7 +2352,7 @@ function Get-EinstellungsDefinitionen {
         OU = '[1] OUs erstellen'; Benutzer = '[2] Benutzer erstellen'
         GlobaleGruppen = '[3] Globale Gruppen'; DLGruppen = '[4] Domänenlokale Gruppen'; AGDLP = '[5] AGDLP-Paket'
         Abteilung = '[6] Abteilung komplett'; Mitgliedschaften = '[7] Mitgliedschaften'; Rueckgaengig = '[8] Rückgängig'
-        DNS = '[D] DNS-Menü'; Subnetzrechner = '[S] Subnetzrechner'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
+        DNS = '[D] DNS-Menü'; GPO = '[G] Gruppenrichtlinien'; Subnetzrechner = '[S] Subnetzrechner'; Schnelleingabe = 'Benutzer: Schnelleingabe'; ZufallsPasswort = 'Benutzer: Zufallspasswörter'
         VorlageBenutzer = 'Benutzer: Vorlage kopieren'; GruppenZuweisen = 'Gruppen direkt zuweisen'
         AbteilungAusfuellen = 'Benutzer: Feld Abteilung'; EmailAusfuellen = 'Benutzer: E-Mail ausfüllen'
         HomeOrdner = 'Benutzer: Home-Ordner'; NTFSRechte = 'DL-Gruppen: NTFS-Rechte'; Freigabe = 'DL-Gruppen: SMB-Freigabe'
@@ -2737,8 +2745,9 @@ function Test-Adminrechte {
 }
 
 # Was kann dieser Server? Ändert nichts und bricht nie ab.
-# Rückgabe: AD, DNS, DnsRolle, DnsDienst, Smb, Gui, Admin, ServerManager ($true/$false),
-#           Domain (Ergebnis von Get-ADDomain) und Grund (Text je fehlender Fähigkeit)
+# Rückgabe: AD, DNS, DnsRolle, DnsDienst, Smb, Gui, Admin, ServerManager, GpoDatei,
+#           GroupPolicy, GPO ($true/$false), Domain (Ergebnis von Get-ADDomain) und
+#           Grund (Text je fehlender Fähigkeit)
 function Get-Faehigkeiten {
     $f = @{
         AD            = $false
@@ -2791,6 +2800,15 @@ function Get-Faehigkeiten {
     else                                          { $f.DNS = $true }
     if (-not $f.DnsClient) { $f.Grund.DnsClient = 'DNS - Resolve-DnsName fehlt (Modul DnsClient)' }
 
+    # Gruppenrichtlinien: Teilmodul-Datei, AD und Modul GroupPolicy (Feature GPMC)
+    $f.GpoDatei    = [bool]($script:Teilmodule -and $script:Teilmodule['GPO'])
+    $f.GroupPolicy = Import-ModulStill 'GroupPolicy'
+    $f.GPO         = $f.AD -and $f.GroupPolicy
+    if (-not $f.GpoDatei)    { $f.Grund.GpoDatei = 'GPO - Datei Module\GPO.psm1 fehlt neben dem Script' }
+    if (-not $f.GroupPolicy) { $f.Grund.GroupPolicy = 'GPO - Modul GroupPolicy fehlt (Feature GPMC, im Menü [G] installierbar)' }
+    if (-not $f.GPO)         { $f.Grund.GPO = if (-not $f.AD) { $f.Grund.AD } else { $f.Grund.GroupPolicy } }
+    if (-not $f.ServerManager) { $f.Grund.ServerManager = 'Modul ServerManager fehlt - Rollen hier nicht installierbar' }
+
     if (-not $f.Smb) { $f.Grund.Smb = 'SMB - Modul SmbShare fehlt' }
     if (-not $f.Gui) { $f.Grund.Gui = 'Auswahlfenster (Out-GridView) nicht vorhanden' }
     return $f
@@ -2819,6 +2837,45 @@ function Initialize-AdUmgebung {
     $richtlinie = Get-ADDefaultDomainPasswordPolicy -ErrorAction SilentlyContinue
     if ($richtlinie) { $script:PwRichtlinie = $richtlinie }
 }
+
+# Windows-Feature installieren (für Teilmodule, z.B. GPMC). Fehlen die Installationsdateien
+# (Server offline), wird nach dem Ordner \sources\sxs gefragt (-Source).
+# $true = Feature ist danach installiert; die Fähigkeiten sind neu geprüft.
+function Install-WindowsRolle {
+    param([string]$Feature, [string]$Typ, [string]$Text)
+    if (-not $script:Faehig.ServerManager) { Write-Warnung 'Modul ServerManager fehlt - Installation hier nicht möglich.'; return $false }
+    $installiert = $false
+    try { $installiert = [bool](Get-WindowsFeature -Name $Feature -ErrorAction Stop).Installed } catch { }
+    if ($installiert) { Add-Ergebnis $Typ $Feature $env:COMPUTERNAME 'VORHANDEN'; $script:Faehig = Get-Faehigkeiten; return $true }
+    if (-not $script:Faehig.Admin) { Write-Warnung 'Ohne Administratorrechte schlägt die Installation fehl.' }
+    Write-Info "Wird installiert: $Text (Install-WindowsFeature $Feature -IncludeManagementTools)"
+    if ($Funktionen.Vorschau -and -not (Read-JaNein 'Jetzt installieren?' $true)) { Stop-Aktion }
+    $quelle = ''
+    while ($true) {
+        $param = @{ Name = $Feature; IncludeManagementTools = $true; ErrorAction = 'Stop' }
+        if ($quelle) { $param.Source = $quelle }
+        try {
+            Write-Info 'Installation läuft, das kann einige Minuten dauern ...'
+            $erg = Install-WindowsFeature @param
+            if (-not $erg.Success) { throw "Installation nicht erfolgreich (ExitCode $($erg.ExitCode))" }
+            Add-Ergebnis $Typ $Feature $env:COMPUTERNAME 'OK' "ExitCode $($erg.ExitCode)"
+            if ("$($erg.RestartNeeded)" -eq 'Yes') { Write-Warnung 'Windows meldet: Neustart des Servers nötig.' }
+            break
+        }
+        catch {
+            $meldung = $_.Exception.Message
+            if (-not (Test-QuelleFehlt $meldung)) { Add-Ergebnis $Typ $Feature $env:COMPUTERNAME 'FEHLER' $meldung; return $false }
+            Write-Warnung 'Die Installationsdateien wurden nicht gefunden (Server offline oder Feature-Dateien entfernt).'
+            Write-Info 'Lösung: Windows-Server-ISO einbinden und den Ordner \sources\sxs angeben, z.B. D:\sources\sxs'
+            Write-Info "(entspricht Install-WindowsFeature $Feature -IncludeManagementTools -Source D:\sources\sxs)"
+            $quelle = (Read-Text 'Pfad zu \sources\sxs (Enter = abbrechen)').Trim('"')
+            if (-not $quelle) { Add-Ergebnis $Typ $Feature $env:COMPUTERNAME 'FEHLER' 'Installationsdateien fehlen - mit -Source erneut versuchen'; return $false }
+            if (-not (Test-Path -LiteralPath $quelle -PathType Container)) { Write-Warnung "Ordner '$quelle' nicht gefunden."; $quelle = '' }
+        }
+    }
+    $script:Faehig = Get-Faehigkeiten
+    return $true
+}
 #endregion
 
 #region ======================= HAUPTMENÜ ===========================
@@ -2836,6 +2893,7 @@ function Get-Hauptmenue {
         [pscustomobject]@{ Taste = '7'; Text = 'Mitglieder zu Gruppen hinzufügen';                           An = $Funktionen.Mitgliedschaften; Braucht = @('AD'); Aktion = { Start-Mitgliedschaften } }
         [pscustomobject]@{ Taste = '8'; Text = 'Rückgängig machen anhand des Protokolls (AD und DNS)';       An = ($Funktionen.Rueckgaengig -and $Funktionen.Protokoll); Braucht = @('AD|DNS'); Aktion = { Start-Rueckgaengig } }
         [pscustomobject]@{ Taste = 'D'; Text = 'DNS: Zonen, Einträge, PTR, Weiterleitungen';                  An = $Funktionen.DNS;              Braucht = @();     Aktion = { Start-DnsMenue } }
+        [pscustomobject]@{ Taste = 'G'; Text = 'Gruppenrichtlinien: GPOs, Netzlaufwerke, Standard-Richtlinien'; An = $Funktionen.GPO;              Braucht = @('AD', 'GpoDatei'); Aktion = { Start-GpoMenue } }
         [pscustomobject]@{ Taste = 'S'; Text = 'Subnetzrechner (IPv4: Netz, Broadcast, Hosts)';              An = $Funktionen.Subnetzrechner;   Braucht = @();     Aktion = { Start-Subnetzrechner } }
         [pscustomobject]@{ Taste = 'E'; Text = 'Einstellungen ansehen und ändern';                            An = $true;                        Braucht = @();     Aktion = { Start-Einstellungen } }
         [pscustomobject]@{ Taste = 'P'; Text = 'Protokoll der Sitzung anzeigen';                             An = $true;                        Braucht = @();     Aktion = { Show-Protokoll } }
@@ -2852,6 +2910,23 @@ function Show-Startanzeige {
              else                       { 'Konsole (Auswahlfenster abgeschaltet)' }
     Write-Info "Auswahlmodus:     $modus"
     if (-not $f.Admin) { Write-Warnung 'Keine Administratorrechte - Änderungen am Server schlagen wahrscheinlich fehl. Script "Als Administrator" starten.' }
+}
+#endregion
+
+#region ======================= TEILMODULE ==========================
+# Größere Bereiche liegen als eigene Dateien in Module\<Name>.psm1 neben dem Script. Sie werden
+# hier in den Script-Bereich geladen (nicht per Import-Module), damit sie Eingabe, Protokoll,
+# Einstellungen und Fähigkeiten des Hauptscripts mitbenutzen. Fehlt eine Datei, fehlen nur
+# ihre Menüpunkte (Grund steht im Menü). Pester lädt die Teilmodule beim Dot-Sourcing mit.
+$script:Teilmodule = @{}
+foreach ($teilmodul in @('GPO')) {
+    $teilmodulPfad = Join-Path (Join-Path $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }) 'Module') "$teilmodul.psm1"
+    if (-not (Test-Path -LiteralPath $teilmodulPfad -PathType Leaf)) { continue }
+    try {
+        . ([scriptblock]::Create([System.IO.File]::ReadAllText($teilmodulPfad)))
+        $script:Teilmodule[$teilmodul] = $teilmodulPfad
+    }
+    catch { Write-Warnung "Teilmodul $teilmodul.psm1 nicht geladen: $($_.Exception.Message)" }
 }
 #endregion
 
