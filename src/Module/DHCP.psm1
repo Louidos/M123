@@ -9,6 +9,8 @@
     Bordmittel: Module DhcpServer (Feature DHCP), ServerManager, NetTCPIP, ActiveDirectory.
     Annahme: DHCP läuft auf diesem Server (Domänencontroller mit DNS), nur IPv4.
     Ablauf und Prüfungen: docs/DHCP.md
+    DNS-Integration (dynamische Updates, Reverse-Zone, Dienstkonto, Alterung): Region
+    DHCP-DNS-INTEGRATION, braucht zusätzlich DnsServer.
 #>
 
 # Registry-Schlüssel des Server-Managers für die DHCP-Rolle ("Konfiguration abschließen")
@@ -627,6 +629,8 @@ function Get-DhcpMenue {
         [pscustomobject]@{ Taste = '5'; Text = 'Bereiche, Leases und Reservierungen anzeigen';                  Braucht = @('DHCP');          Aktion = { Show-DhcpUebersicht } }
         [pscustomobject]@{ Taste = '6'; Text = 'Bereich entfernen';                                             Braucht = @('DHCP');          Aktion = { Start-DhcpBereichEntfernen } }
         [pscustomobject]@{ Taste = '7'; Text = 'Ganze Konfiguration aus Datei laden (ohne Fragen)';             Braucht = @();                Aktion = { Start-DhcpAusDatei } }
+        [pscustomobject]@{ Taste = '8'; Text = 'DNS-Integration für DHCP einrichten (Updates, Reverse-Zone, Dienstkonto)'; Braucht = @('DHCP', 'AD'); Aktion = { Start-DhcpDnsIntegration } }
+        [pscustomobject]@{ Taste = '9'; Text = 'DNS-Integration prüfen (Einstellungen, A/PTR der Leases)';       Braucht = @('DHCP');          Aktion = { Show-DhcpDnsPruefung } }
     )
 }
 
@@ -674,8 +678,11 @@ function Start-DhcpAssistent {
     $server = Read-DhcpServerIp
     if (-not (Initialize-DhcpServer $server.Ip)) { Write-Warnung 'Server ist noch nicht bereit - Meldungen oben beachten.'; return }
     Write-Ok 'DHCP-Server ist vorbereitet.'
-    if (-not (Read-JaNein 'Jetzt einen Bereich anlegen?' $true)) { return }
-    Start-DhcpBereich -ServerIp $server.Ip -Praefix $server.Praefix
+    if (Read-JaNein 'Jetzt einen Bereich anlegen?' $true) { Start-DhcpBereich -ServerIp $server.Ip -Praefix $server.Praefix }
+    if ($script:Faehig.AD -and @(Get-DhcpBereiche).Count -and
+        (Read-JaNein 'DNS-Integration jetzt einrichten (Clients automatisch mit A- und PTR-Eintrag ins DNS, empfohlen)?' $true)) {
+        Start-DhcpDnsIntegration
+    }
 }
 
 # [H][3]
@@ -842,14 +849,318 @@ function Start-DhcpAusDatei {
     Write-Info "Server: $(Get-DhcpFqdn) ($($konfig.ServerIp))"
     Show-DhcpServerStand (Get-DhcpServerStand $konfig.ServerIp)
     foreach ($p in $konfig.Plaene) { Write-Host ''; Show-DhcpPlan $p }
-    if ($konfig.DnsIntegration) { Write-Info 'DnsIntegration = true: DNS-Integration wird danach eingerichtet (falls verfügbar).' }
+    if ($konfig.DnsIntegration) { Write-Info 'DnsIntegration = true: danach DNS-Integration (Updates, Reverse-Zone, Dienstkonto - das Passwort wird gefragt).' }
     if (-not (Read-JaNein 'Alles jetzt so einrichten?' $true)) { Stop-Aktion }
 
     if (-not (Initialize-DhcpServer $konfig.ServerIp -Bestaetigt)) { Write-Warnung 'Server ist noch nicht bereit - Bereiche werden nicht angelegt.'; return }
     foreach ($p in $konfig.Plaene) { [void](New-DhcpBereichAusPlan $p) }
-    if ($konfig.DnsIntegration -and (Get-Command Start-DhcpDnsIntegration -ErrorAction SilentlyContinue)) {
-        Start-DhcpDnsIntegration -Plaene $konfig.Plaene -Automatisch
-    }
+    if ($konfig.DnsIntegration) { Start-DhcpDnsIntegration -Plaene $konfig.Plaene -Automatisch }
     Write-Ok 'Fertig - Details stehen im Protokoll ([P]).'
+}
+#endregion
+
+#region ======================= DHCP-DNS-INTEGRATION =================
+# DHCP trägt Clients mit A- und PTR-Eintrag ins DNS ein und löscht sie bei Ablauf der Lease.
+# Läuft DHCP auf einem DC, laufen die Updates über ein eigenes Dienstkonto (sonst gehören die
+# Einträge dem Computerkonto des DCs) - siehe docs/DHCP.md. Das Passwort wird nur als
+# SecureString verarbeitet und nie protokolliert.
+
+$script:DhcpDnsKontoVorschlag = 'svc-dhcp-dns'
+
+# Reverse-Zonen für ein DHCP-Netz: /24-Zonen, wenn höchstens vier nötig sind, sonst /16,
+# sonst /8. Rückgabe wie ConvertTo-ReverseZonenName (Zone, NetworkId, Fehler)
+function Get-ReverseZonenFuerNetz([string]$Netz, [int]$Praefix) {
+    $zahl = ConvertTo-IpZahl $Netz
+    if ($null -eq $zahl -or $Praefix -lt 8 -or $Praefix -gt 32) { return @() }
+    $ziel = 8
+    foreach ($z in 24, 16) {
+        if ($Praefix -ge $z -or ([int64]1 -shl ($z - $Praefix)) -le 4) { $ziel = $z; break }
+    }
+    $anzahl  = if ($Praefix -ge $ziel) { 1 } else { [int64]1 -shl ($ziel - $Praefix) }
+    $schritt = [int64]1 -shl (32 - $ziel)
+    $basis   = $zahl - ($zahl % $schritt)
+    $liste = for ($i = 0; $i -lt $anzahl; $i++) {
+        $o = Get-IpOktette ($basis + $i * $schritt)
+        ConvertTo-ReverseZonenName ((@($o[0..($ziel / 8 - 1)]) -join '.') + "/$ziel")
+    }
+    return @($liste)
+}
+
+# Passende (längste) Forward-Zone für einen vollständigen Namen -> Zone, Name ('' = keine)
+function Get-DnsZoneFuerName([string]$Fqdn, [string[]]$Zonen) {
+    $f = "$Fqdn".Trim().TrimEnd('.').ToLower()
+    $beste = @($Zonen | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('.').ToLower() } |
+               Where-Object { $f -eq $_ -or $f.EndsWith(".$_") } | Sort-Object Length -Descending) | Select-Object -First 1
+    if (-not $beste) { return [pscustomobject]@{ Zone = ''; Name = '' } }
+    $name = if ($f -eq $beste) { '@' } else { $f.Substring(0, $f.Length - $beste.Length - 1) }
+    return [pscustomobject]@{ Zone = $beste; Name = $name }
+}
+
+# Soll-Einstellungen von DHCP für DNS: Abweichungen als Liste (leer = alles richtig)
+function Get-DhcpDnsAbweichungen($Einstellung) {
+    $liste = [System.Collections.Generic.List[string]]::new()
+    if ("$($Einstellung.DynamicUpdates)" -ne 'Always') { $liste.Add("Dynamische Updates: $($Einstellung.DynamicUpdates) -> Always (immer)") }
+    if (-not $Einstellung.DeleteDnsRROnLeaseExpiry) { $liste.Add('Einträge bei Ablauf der Lease löschen: nein -> ja') }
+    if (-not $Einstellung.UpdateDnsRRForOlderClients) { $liste.Add('Auch für ältere Clients eintragen: nein -> ja') }
+    if ($Einstellung.DisableDnsPtrRRUpdate) { $liste.Add('PTR-Einträge aktualisieren: aus -> an') }
+    return $liste.ToArray()
+}
+
+function Get-DhcpDnsEinstellung([string]$ScopeId = '') {
+    $param = @{ ErrorAction = 'Stop' }
+    if ($ScopeId) { $param.ScopeId = $ScopeId }
+    return (Get-DhcpServerv4DnsSetting @param)
+}
+
+# DHCP-DNS-Einstellungen auf Serverebene setzen (gilt für alle Bereiche ohne eigene Einstellung)
+function Set-DhcpDnsEinstellungen {
+    $alt = Get-DhcpDnsEinstellung
+    $abw = @(Get-DhcpDnsAbweichungen $alt)
+    if ($abw.Count -eq 0) { Add-Ergebnis 'DHCP-DNS' 'Always, löschen bei Ablauf, ältere Clients' $env:COMPUTERNAME 'VORHANDEN'; return }
+    try {
+        Set-DhcpServerv4DnsSetting -DynamicUpdates Always -DeleteDnsRROnLeaseExpiry $true -UpdateDnsRRForOlderClients $true -DisableDnsPtrRRUpdate $false -ErrorAction Stop
+        Add-Ergebnis 'DHCP-DNS' 'Always, löschen bei Ablauf, ältere Clients' $env:COMPUTERNAME 'OK' ($abw -join '; ')
+    }
+    catch { Add-Ergebnis 'DHCP-DNS' 'Always, löschen bei Ablauf, ältere Clients' $env:COMPUTERNAME 'FEHLER' $_.Exception.Message }
+    # Bereiche mit eigener, abweichender Einstellung ebenfalls anpassen
+    foreach ($b in @(Get-DhcpBereiche)) {
+        $id = "$($b.ScopeId)"
+        try { $abwB = @(Get-DhcpDnsAbweichungen (Get-DhcpDnsEinstellung $id)) } catch { continue }
+        if ($abwB.Count -eq 0) { continue }
+        try {
+            Set-DhcpServerv4DnsSetting -ScopeId $id -DynamicUpdates Always -DeleteDnsRROnLeaseExpiry $true -UpdateDnsRRForOlderClients $true -DisableDnsPtrRRUpdate $false -ErrorAction Stop
+            Add-Ergebnis 'DHCP-DNS' "Bereich $id" $id 'OK' ($abwB -join '; ')
+        }
+        catch { Add-Ergebnis 'DHCP-DNS' "Bereich $id" $id 'FEHLER' $_.Exception.Message }
+    }
+}
+
+# Pläne für Reverse-Zonen der DHCP-Netze: Neu / Sicher machen / Vorhanden
+function Get-DhcpReverseZonenPlan([object[]]$Netze) {
+    $dns = Get-DnsParameter
+    $plaene = [System.Collections.Generic.List[object]]::new()
+    foreach ($n in $Netze) {
+        foreach ($r in @(Get-ReverseZonenFuerNetz $n.Netz $n.Praefix)) {
+            if ($r.Fehler -or @($plaene | Where-Object { $_.Zone -eq $r.Zone }).Count) { continue }
+            $zone = Get-DnsServerZone -Name $r.Zone @dns -ErrorAction SilentlyContinue
+            $art = if (-not $zone) { 'Neu' } elseif ("$($zone.DynamicUpdate)" -ne 'Secure' -and $zone.IsDsIntegrated) { 'Sicher' } else { 'Vorhanden' }
+            $plaene.Add([pscustomobject]@{ Zone = $r.Zone; NetworkId = $r.NetworkId; Art = $art; Updates = $(if ($zone) { "$($zone.DynamicUpdate)" } else { '' }) })
+        }
+    }
+    return $plaene.ToArray()
+}
+
+function Invoke-DhcpReverseZonenPlan([object[]]$Plaene) {
+    $dns = Get-DnsParameter
+    $ad  = Test-DnsServerIstDc
+    $optionen = [pscustomobject]@{ AdIntegriert = $ad; DynamicUpdate = $(if ($ad) { 'Secure' } else { 'NonsecureAndSecure' }) }
+    foreach ($p in $Plaene) {
+        switch ($p.Art) {
+            'Neu'       { [void](New-DnsZone -Zone $p.Zone -NetworkId $p.NetworkId -Optionen $optionen) }
+            'Vorhanden' { Add-Ergebnis 'DNS-Zone' $p.Zone $p.Zone 'VORHANDEN' "Updates: $($p.Updates)" }
+            'Sicher' {
+                try {
+                    Set-DnsServerPrimaryZone -Name $p.Zone -DynamicUpdate Secure @dns -ErrorAction Stop
+                    Add-Ergebnis 'DNS-Zone-Updates' $p.Zone $p.Zone 'OK' "vorher $($p.Updates), jetzt Secure (nur sichere)"
+                }
+                catch { Add-Ergebnis 'DNS-Zone-Updates' $p.Zone $p.Zone 'FEHLER' $_.Exception.Message }
+            }
+        }
+    }
+}
+
+# Passwort eines vorhandenen Kontos prüfen ($null = Prüfung nicht möglich). Klartext nur kurz im Speicher.
+function Test-DienstkontoPasswort([string]$Sam, [securestring]$Passwort) {
+    try {
+        Add-Type -AssemblyName System.DirectoryServices.AccountManagement -ErrorAction Stop
+        $kontext = [System.DirectoryServices.AccountManagement.PrincipalContext]::new('Domain', $Domain.DNSRoot)
+        try { return $kontext.ValidateCredentials($Sam, (ConvertTo-Klartext $Passwort)) }
+        finally { $kontext.Dispose() }
+    }
+    catch { return $null }
+}
+
+# Dienstkonto wählen oder anlegen -> Konto (Sam, DN, Neu) + Passwort (SecureString)
+function Read-DhcpDnsKonto {
+    $aktuell = $null
+    try { $aktuell = Get-DhcpServerDnsCredential -ErrorAction Stop } catch { $aktuell = $null }
+    $vorschlag = if ($aktuell -and "$($aktuell.UserName)") { "$($aktuell.UserName)" } else { $script:DhcpDnsKontoVorschlag }
+    if ($aktuell -and "$($aktuell.UserName)") { Write-Info "Hinterlegt ist bisher: $($aktuell.DomainName)\$($aktuell.UserName)" }
+    while ($true) {
+        $sam = Read-Text 'Dienstkonto für die DNS-Updates (Anmeldename)' $vorschlag -Pflicht
+        if ($sam -match '["/\\\[\]:;|=,+*?<>\s@]' -or $sam.Length -gt 20) { Write-Warnung 'Ungültiger Anmeldename (max. 20 Zeichen, ohne Leer- und Sonderzeichen).'; continue }
+        $vorhanden = Get-ADUser -LDAPFilter "(sAMAccountName=$(ConvertTo-LdapWert $sam))" -Properties PasswordNeverExpires -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $vorhanden -and (Test-SamVorhanden $sam)) { Write-Warnung "'$sam' ist schon von einem anderen Objekt (z.B. Gruppe) belegt."; continue }
+        break
+    }
+    if ($vorhanden) {
+        Write-Info "Konto vorhanden: $($vorhanden.DistinguishedName)"
+        if ($aktuell -and "$($aktuell.UserName)" -eq $sam -and -not (Read-JaNein 'Ist schon hinterlegt. Passwort neu hinterlegen?' $false)) {
+            return [pscustomobject]@{ Sam = $sam; DN = $vorhanden.DistinguishedName; Neu = $false; Passwort = $null; Behalten = $true }
+        }
+        while ($true) {
+            $pw = Read-Host "  Passwort von $sam (wird nicht angezeigt und nicht protokolliert)" -AsSecureString
+            $ok = Test-DienstkontoPasswort $sam $pw
+            if ($ok -eq $false) { Write-Warnung 'Das Passwort stimmt nicht.'; continue }
+            if ($null -eq $ok) { Write-Info 'Passwort konnte nicht geprüft werden - wird so hinterlegt.' }
+            break
+        }
+        return [pscustomobject]@{ Sam = $sam; DN = $vorhanden.DistinguishedName; Neu = $false; Passwort = $pw; Behalten = $false }
+    }
+    Write-Info "Das Konto '$sam' wird neu angelegt: normaler Domänenbenutzer, Passwort läuft nicht ab, keine weiteren Rechte."
+    $ziel = $Domain.UsersContainer
+    if (-not (Read-JaNein "Im Standard-Container $(Get-Kurzpfad $ziel) anlegen?" $true)) { $ziel = Select-AdZiel 'das Dienstkonto' }
+    $pw = Read-Passwort $sam
+    return [pscustomobject]@{ Sam = $sam; DN = "CN=$sam,$ziel"; Ziel = $ziel; Neu = $true; Passwort = $pw; Behalten = $false }
+}
+
+# Konto anlegen (falls neu) und bei DHCP hinterlegen. Das Passwort landet nur im PSCredential.
+function Set-DhcpDnsKonto($Konto) {
+    $anzeige = "$($Domain.NetBIOSName)\$($Konto.Sam)"
+    if ($Konto.Neu) {
+        try {
+            $u = New-ADUser -Name $Konto.Sam -SamAccountName $Konto.Sam -UserPrincipalName "$($Konto.Sam)@$($Domain.DNSRoot)" `
+                            -Path $Konto.Ziel -AccountPassword $Konto.Passwort -Enabled $true -PasswordNeverExpires $true `
+                            -CannotChangePassword $true -Description 'DHCP: dynamische DNS-Updates (AD-Schnellanlage)' -PassThru -ErrorAction Stop
+            Add-Ergebnis 'Benutzer' $Konto.Sam $u.DistinguishedName 'OK' 'Dienstkonto DHCP-DNS, Passwort läuft nicht ab'
+        }
+        catch { Add-Ergebnis 'Benutzer' $Konto.Sam $Konto.DN 'FEHLER' $_.Exception.Message; return }
+    }
+    if ($Konto.Behalten) { Add-Ergebnis 'DHCP-DNS-Konto' $anzeige $env:COMPUTERNAME 'VORHANDEN'; return }
+    try {
+        $cred = New-Object System.Management.Automation.PSCredential($anzeige, $Konto.Passwort)
+        Set-DhcpServerDnsCredential -Credential $cred -ErrorAction Stop
+        Add-Ergebnis 'DHCP-DNS-Konto' $anzeige $env:COMPUTERNAME 'OK' 'hinterlegt (Passwort wird nicht protokolliert)'
+    }
+    catch { Add-Ergebnis 'DHCP-DNS-Konto' $anzeige $env:COMPUTERNAME 'FEHLER' $_.Exception.Message }
+}
+
+# Alterung/Bereinigung (Scavenging): Zonen + Server, je 7 Tage
+function Set-DnsAlterung([string[]]$Zonen) {
+    $dns = Get-DnsParameter
+    $sieben = [TimeSpan]::FromDays(7)
+    foreach ($z in @($Zonen | Where-Object { $_ } | Select-Object -Unique)) {
+        try {
+            $alt = Get-DnsServerZoneAging -Name $z @dns -ErrorAction Stop
+            if ($alt.AgingEnabled) { Add-Ergebnis 'DNS-Alterung' $z $z 'VORHANDEN'; continue }
+            Set-DnsServerZoneAging -Name $z -Aging $true -RefreshInterval $sieben -NoRefreshInterval $sieben @dns -ErrorAction Stop
+            Add-Ergebnis 'DNS-Alterung' $z $z 'OK' 'Refresh 7 Tage, kein Refresh 7 Tage'
+        }
+        catch { Add-Ergebnis 'DNS-Alterung' $z $z 'FEHLER' $_.Exception.Message }
+    }
+    try {
+        $s = Get-DnsServerScavenging @dns -ErrorAction Stop
+        if ($s.ScavengingState) { Add-Ergebnis 'DNS-Alterung' 'Server-Bereinigung' (Get-DnsServerAnzeige) 'VORHANDEN' "alle $($s.ScavengingInterval)" ; return }
+        Set-DnsServerScavenging -ScavengingState $true -ScavengingInterval $sieben @dns -ErrorAction Stop
+        Add-Ergebnis 'DNS-Alterung' 'Server-Bereinigung' (Get-DnsServerAnzeige) 'OK' 'alle 7 Tage'
+    }
+    catch { Add-Ergebnis 'DNS-Alterung' 'Server-Bereinigung' (Get-DnsServerAnzeige) 'FEHLER' $_.Exception.Message }
+}
+
+# [H][8] DNS-Integration einrichten. $Plaene (aus Datei/Assistent) = diese Netze, sonst alle Bereiche.
+# -Automatisch: ohne Rückfrage zur Übersicht, Alterung bleibt aus (Passwort wird trotzdem gefragt)
+function Start-DhcpDnsIntegration([object[]]$Plaene = @(), [switch]$Automatisch) {
+    Write-Titel 'DNS-Integration für DHCP einrichten'
+    if (-not $script:Faehig.DHCP) { Write-Warnung "DHCP nicht verfügbar: $($script:Faehig.Grund.DHCP)"; return }
+    if (-not $script:Faehig.AD) { Write-Warnung "Kein Active Directory: $($script:Faehig.Grund.AD)"; return }
+    $netze = if (@($Plaene).Count) { @($Plaene | ForEach-Object { [pscustomobject]@{ Netz = $_.Netz; Praefix = [int]$_.Praefix } }) }
+             else { @(Get-DhcpBereiche | ForEach-Object { [pscustomobject]@{ Netz = "$($_.ScopeId)"; Praefix = [int](Get-PraefixAusEingabe "$($_.SubnetMask)") } }) }
+    if ($netze.Count -eq 0) { Write-Warnung 'Noch kein DHCP-Bereich - zuerst unter [3] anlegen.'; return }
+
+    $abw = @(Get-DhcpDnsAbweichungen (Get-DhcpDnsEinstellung))
+    $zonen = @()
+    if ($script:Faehig.DNS) { $zonen = @(Get-DhcpReverseZonenPlan $netze) }
+    else { Write-Warnung "DNS nicht verfügbar ($($script:Faehig.Grund.DNS)) - Reverse-Zonen bitte später unter [D][4] anlegen." }
+
+    Write-Info 'Geplant:'
+    if ($abw.Count) { foreach ($a in $abw) { Write-Host "    DHCP      $a" -ForegroundColor White } }
+    else { Write-Host '    DHCP      Einstellungen stimmen schon (Always, löschen bei Ablauf, ältere Clients)' -ForegroundColor Yellow }
+    foreach ($z in $zonen) {
+        switch ($z.Art) {
+            'Neu'       { Write-Host "    Zone      $($z.Zone)   neu ($($z.NetworkId), nur sichere Updates)" -ForegroundColor White }
+            'Sicher'    { Write-Host "    Zone      $($z.Zone)   Updates $($z.Updates) -> nur sichere" -ForegroundColor White }
+            'Vorhanden' { Write-Host "    Zone      $($z.Zone)   vorhanden (Updates $($z.Updates))" -ForegroundColor Yellow }
+        }
+    }
+    Write-Host '    Konto     Dienstkonto für DNS-Updates (wird gleich gefragt)' -ForegroundColor White
+    if (-not $Automatisch -and $Funktionen.Vorschau -and -not (Read-JaNein 'So einrichten?' $true)) { Stop-Aktion }
+
+    $konto = Read-DhcpDnsKonto
+    Set-DhcpDnsEinstellungen
+    if ($zonen.Count) { Invoke-DhcpReverseZonenPlan $zonen }
+    Set-DhcpDnsKonto $konto
+
+    if ($script:Faehig.DNS -and -not $Automatisch) {
+        Write-Host ''
+        Write-Info 'Alterung/Bereinigung (Scavenging): Der DNS-Server löscht dynamische Einträge, die 14 Tage nicht'
+        Write-Info 'erneuert wurden (7 Tage kein Refresh + 7 Tage Refresh), Prüfung alle 7 Tage. Statische Einträge'
+        Write-Info 'bleiben. Hilft gegen Leichen von Geräten, die nie ordentlich abgemeldet wurden.'
+        if (Read-JaNein 'Alterung/Bereinigung für die Reverse-Zone(n) und die Domänen-Zone aktivieren?' $false) {
+            Set-DnsAlterung (@($zonen | ForEach-Object { $_.Zone }) + @($Domain.DNSRoot))
+        }
+    }
+    Write-Ok 'DNS-Integration eingerichtet. Neue Leases erscheinen mit A- und PTR-Eintrag - prüfen mit [9].'
+}
+
+# Für jede Lease mit Hostname: A- und PTR-Eintrag vorhanden? -> Zeilen
+function Get-DhcpLeaseDnsStand([object[]]$Leases, [string[]]$ForwardZonen, [string[]]$ReverseZonen) {
+    $dns = Get-DnsParameter
+    $zeilen = foreach ($l in @($Leases | Where-Object { "$($_.HostName)" })) {
+        $ip   = "$($l.IPAddress)"
+        $fqdn = "$($l.HostName)".TrimEnd('.').ToLower()
+        if (-not $fqdn.Contains('.') -and $Domain) { $fqdn = "$fqdn.$($Domain.DNSRoot)".ToLower() }
+        $a = 'keine Zone'
+        $f = Get-DnsZoneFuerName $fqdn $ForwardZonen
+        if ($f.Zone) {
+            $rr = @(Get-DnsServerResourceRecord -ZoneName $f.Zone -Name $f.Name -RRType A @dns -ErrorAction SilentlyContinue)
+            $a = if (@($rr | Where-Object { "$($_.RecordData.IPv4Address)" -eq $ip }).Count) { 'ja' } elseif ($rr.Count) { 'andere IP' } else { 'nein' }
+        }
+        $ptr = 'keine Zone'
+        $r = Get-PtrZielFuerIp $ip $ReverseZonen
+        if ($r.Zone) {
+            $rr = @(Get-DnsServerResourceRecord -ZoneName $r.Zone -Name $r.Name -RRType Ptr @dns -ErrorAction SilentlyContinue)
+            $ptr = if (@($rr | Where-Object { "$($_.RecordData.PtrDomainName)".TrimEnd('.').ToLower() -eq $fqdn }).Count) { 'ja' } elseif ($rr.Count) { 'anderer Name' } else { 'nein' }
+        }
+        [pscustomobject]@{ IP = $ip; Hostname = $fqdn; A = $a; PTR = $ptr }
+    }
+    return @($zeilen)
+}
+
+# [H][9] DNS-Integration prüfen
+function Show-DhcpDnsPruefung {
+    Write-Titel 'DNS-Integration prüfen'
+    $e = Get-DhcpDnsEinstellung
+    $jn = { param($W) if ($W) { 'ja' } else { 'nein' } }
+    Write-Info "Dynamische Updates:              $($e.DynamicUpdates)"
+    Write-Info "Löschen bei Ablauf der Lease:    $(& $jn $e.DeleteDnsRROnLeaseExpiry)"
+    Write-Info "Auch für ältere Clients:         $(& $jn $e.UpdateDnsRRForOlderClients)"
+    Write-Info "PTR-Einträge aktualisieren:      $(& $jn (-not $e.DisableDnsPtrRRUpdate))"
+    $abw = @(Get-DhcpDnsAbweichungen $e)
+    if ($abw.Count) { Write-Warnung "Weicht ab: $($abw -join '; ') - mit [8] einrichten." } else { Write-Ok 'DHCP-Einstellungen für DNS stimmen.' }
+    try {
+        $k = Get-DhcpServerDnsCredential -ErrorAction Stop
+        if ("$($k.UserName)") { Write-Info "Dienstkonto:                     $($k.DomainName)\$($k.UserName)" }
+        else { Write-Warnung 'Kein Dienstkonto hinterlegt - Updates laufen über das Computerkonto (auf einem DC nicht empfohlen).' }
+    }
+    catch { Write-Warnung "Dienstkonto nicht lesbar: $($_.Exception.Message)" }
+    if (-not $script:Faehig.DNS) { Write-Warnung "DNS nicht verfügbar ($($script:Faehig.Grund.DNS)) - A/PTR-Prüfung übersprungen."; return }
+
+    $forward = @(Get-DnsZonen -Forward | ForEach-Object { $_.ZoneName })
+    $reverse = @(Get-DnsZonen -Reverse | ForEach-Object { $_.ZoneName })
+    foreach ($b in @(Get-DhcpBereiche)) {
+        $id = "$($b.ScopeId)"
+        $praefix = [int](Get-PraefixAusEingabe "$($b.SubnetMask)")
+        Write-Host ''
+        Write-Host "  Bereich $id/$praefix ($($b.Name))" -ForegroundColor Cyan
+        foreach ($z in @(Get-ReverseZonenFuerNetz $id $praefix)) {
+            if ($reverse -contains $z.Zone) { Write-Info "Reverse-Zone $($z.Zone): vorhanden" } else { Write-Warnung "Reverse-Zone $($z.Zone) fehlt - mit [8] anlegen." }
+        }
+        $zeilen = @(Get-DhcpLeaseDnsStand @(Get-DhcpServerv4Lease -ScopeId $id -ErrorAction SilentlyContinue) $forward $reverse)
+        if ($zeilen.Count -eq 0) { Write-Info 'Keine Leases mit Hostname.'; continue }
+        $zeilen | Format-Table -AutoSize | Out-Host
+        $ok = @($zeilen | Where-Object { $_.A -eq 'ja' -and $_.PTR -eq 'ja' }).Count
+        if ($ok -eq $zeilen.Count) { Write-Ok "Alle $ok Lease(s) haben A- und PTR-Eintrag." }
+        else { Write-Warnung "$($zeilen.Count - $ok) von $($zeilen.Count) Lease(s) ohne vollständigen A-/PTR-Eintrag (Client neu verbinden: ipconfig /release + /renew)." }
+    }
 }
 #endregion

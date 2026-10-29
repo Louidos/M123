@@ -6,6 +6,13 @@ $wurzel = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
 # Platzhalter für Befehle, die es auf dem Testrechner nicht gibt (Pester kann nur Vorhandenes mocken)
 $platzhalter = @{
+    'Get-DhcpServerv4DnsSetting'     = { [CmdletBinding()] param($ScopeId) }
+    'Set-DhcpServerv4DnsSetting'     = { [CmdletBinding()] param($ScopeId, $DynamicUpdates, $DeleteDnsRROnLeaseExpiry, $UpdateDnsRRForOlderClients, $DisableDnsPtrRRUpdate) }
+    'Get-DhcpServerDnsCredential'    = { [CmdletBinding()] param() }
+    'Set-DhcpServerDnsCredential'    = { [CmdletBinding()] param([pscredential]$Credential) }
+    'Get-ADUser'                     = { [CmdletBinding()] param([string]$LDAPFilter, [string[]]$Properties, $Identity, [string]$Server) }
+    'New-ADUser'                     = { [CmdletBinding()] param([string]$Name, [string]$SamAccountName, [string]$UserPrincipalName, [string]$Path, [securestring]$AccountPassword, $Enabled, $PasswordNeverExpires, $CannotChangePassword, [string]$Description, [switch]$PassThru, [string]$Server) }
+    'Get-ADObject'                   = { [CmdletBinding()] param($Identity, [string]$LDAPFilter, [string[]]$Properties, [string]$Server) }
     'Get-DhcpServerv4Scope'          = { [CmdletBinding()] param($ScopeId) }
     'Add-DhcpServerv4Scope'          = { [CmdletBinding()] param([string]$Name, $StartRange, $EndRange, $SubnetMask, $LeaseDuration, $State, [string]$Description) }
     'Set-DhcpServerv4Scope'          = { [CmdletBinding()] param($ScopeId, $State) }
@@ -28,6 +35,10 @@ $platzhalter = @{
 foreach ($befehl in @($platzhalter.Keys)) {
     if (-not (Get-Command $befehl -ErrorAction SilentlyContinue)) { Set-Item -Path "function:global:$befehl" -Value $platzhalter[$befehl] }
 }
+# DNS-Befehle immer überdecken (wie in Dns.Tests.ps1), damit die Mocks keine echten CIM-Objekte verlangen
+function global:Get-DnsServerZone { [CmdletBinding()] param([string]$Name, [string]$ComputerName) }
+function global:Set-DnsServerPrimaryZone { [CmdletBinding()] param([string]$Name, [string]$DynamicUpdate, [string]$ComputerName) }
+function global:Get-DnsServerResourceRecord { [CmdletBinding()] param([string]$ZoneName, [string]$Name, [string]$RRType, [string]$ComputerName) }
 
 $Domain = [pscustomobject]@{ DNSRoot = 'firma.local'; NetBIOSName = 'FIRMA'; PDCEmulator = 'dc01.firma.local'; DistinguishedName = 'DC=firma,DC=local' }
 
@@ -342,9 +353,10 @@ Describe 'New-DhcpBereichAusPlan' {
 }
 
 Describe 'Get-DhcpMenue / Fähigkeiten' {
-    It 'hat die Punkte 1 bis 7, Assistent und Datei ohne Voraussetzung' {
+    It 'hat die Punkte 1 bis 9, Assistent und Datei ohne Voraussetzung' {
         $m = @(Get-DhcpMenue)
-        (@($m | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,4,5,6,7'
+        (@($m | ForEach-Object { $_.Taste }) -join ',') | Should Be '1,2,3,4,5,6,7,8,9'
+        (@(($m | Where-Object { $_.Taste -eq '8' }).Braucht) -join ',') | Should Be 'DHCP,AD'
         @(($m | Where-Object { $_.Taste -eq '2' }).Braucht).Count | Should Be 0
         @(($m | Where-Object { $_.Taste -eq '7' }).Braucht).Count | Should Be 0
         @($m | Where-Object { $_.Taste -in '3', '4', '5', '6' -and @($_.Braucht) -notcontains 'DHCP' }).Count | Should Be 0
@@ -377,5 +389,137 @@ Describe 'Get-DhcpMenue / Fähigkeiten' {
             $f.DHCP | Should Be $false
             $f.Grund.DHCP | Should Match 'Rolle nicht installiert'
         }
+    }
+}
+
+Describe 'Get-ReverseZonenFuerNetz' {
+    It 'nimmt bei /24 und kleiner die /24-Zone' {
+        (@(Get-ReverseZonenFuerNetz '192.168.10.0' 24) | ForEach-Object { $_.Zone }) -join ',' | Should Be '10.168.192.in-addr.arpa'
+        (@(Get-ReverseZonenFuerNetz '192.168.10.64' 26) | ForEach-Object { $_.Zone }) -join ',' | Should Be '10.168.192.in-addr.arpa'
+        (Get-ReverseZonenFuerNetz '192.168.10.0' 24)[0].NetworkId | Should Be '192.168.10.0/24'
+    }
+    It 'nimmt bis zu vier /24-Zonen, sonst /16 oder /8' {
+        (@(Get-ReverseZonenFuerNetz '192.168.8.0' 22) | ForEach-Object { $_.Zone }) -join ',' | Should Be '8.168.192.in-addr.arpa,9.168.192.in-addr.arpa,10.168.192.in-addr.arpa,11.168.192.in-addr.arpa'
+        (@(Get-ReverseZonenFuerNetz '172.16.0.0' 20) | ForEach-Object { $_.Zone }) -join ',' | Should Be '16.172.in-addr.arpa'
+        (@(Get-ReverseZonenFuerNetz '10.0.0.0' 15) | ForEach-Object { $_.Zone }) -join ',' | Should Be '0.10.in-addr.arpa,1.10.in-addr.arpa'
+        (@(Get-ReverseZonenFuerNetz '10.0.0.0' 12) | ForEach-Object { $_.Zone }) -join ',' | Should Be '10.in-addr.arpa'
+    }
+}
+
+Describe 'Get-DnsZoneFuerName' {
+    It 'findet die längste passende Zone' {
+        $z = Get-DnsZoneFuerName 'PC01.sub.firma.local.' @('firma.local', 'sub.firma.local')
+        $z.Zone | Should Be 'sub.firma.local'
+        $z.Name | Should Be 'pc01'
+        (Get-DnsZoneFuerName 'pc01.andere.de' @('firma.local')).Zone | Should Be ''
+    }
+}
+
+Describe 'Get-DhcpDnsAbweichungen' {
+    It 'meldet nichts, wenn alles stimmt' {
+        @(Get-DhcpDnsAbweichungen ([pscustomobject]@{ DynamicUpdates = 'Always'; DeleteDnsRROnLeaseExpiry = $true; UpdateDnsRRForOlderClients = $true; DisableDnsPtrRRUpdate = $false })).Count | Should Be 0
+    }
+    It 'meldet die Windows-Standardwerte als abweichend' {
+        @(Get-DhcpDnsAbweichungen ([pscustomobject]@{ DynamicUpdates = 'OnClientRequest'; DeleteDnsRROnLeaseExpiry = $true; UpdateDnsRRForOlderClients = $false; DisableDnsPtrRRUpdate = $false })).Count | Should Be 2
+    }
+}
+
+Describe 'Set-DhcpDnsEinstellungen' {
+    Mock Add-Ergebnis { }
+    Mock Set-DhcpServerv4DnsSetting { }
+    Mock Get-DhcpBereiche { @() }
+
+    It 'setzt Always, Löschen bei Ablauf und ältere Clients' {
+        Mock Get-DhcpServerv4DnsSetting { [pscustomobject]@{ DynamicUpdates = 'OnClientRequest'; DeleteDnsRROnLeaseExpiry = $true; UpdateDnsRRForOlderClients = $false; DisableDnsPtrRRUpdate = $false } }
+        Set-DhcpDnsEinstellungen
+        Assert-MockCalled Set-DhcpServerv4DnsSetting -Times 1 -Exactly -Scope It -ParameterFilter {
+            "$DynamicUpdates" -eq 'Always' -and $DeleteDnsRROnLeaseExpiry -eq $true -and $UpdateDnsRRForOlderClients -eq $true -and -not $ScopeId
+        }
+    }
+    It 'ändert nichts, wenn es schon stimmt' {
+        Mock Get-DhcpServerv4DnsSetting { [pscustomobject]@{ DynamicUpdates = 'Always'; DeleteDnsRROnLeaseExpiry = $true; UpdateDnsRRForOlderClients = $true; DisableDnsPtrRRUpdate = $false } }
+        Set-DhcpDnsEinstellungen
+        Assert-MockCalled Set-DhcpServerv4DnsSetting -Times 0 -Exactly -Scope It
+        Assert-MockCalled Add-Ergebnis -Scope It -ParameterFilter { $Typ -eq 'DHCP-DNS' -and $Status -eq 'VORHANDEN' }
+    }
+}
+
+Describe 'Get-DhcpReverseZonenPlan' {
+    Mock Get-DnsServerZone { $null }
+    Mock Get-DnsServerZone { [pscustomobject]@{ ZoneName = '10.168.192.in-addr.arpa'; DynamicUpdate = 'Secure'; IsDsIntegrated = $true } } -ParameterFilter { $Name -eq '10.168.192.in-addr.arpa' }
+    Mock Get-DnsServerZone { [pscustomobject]@{ ZoneName = '20.168.192.in-addr.arpa'; DynamicUpdate = 'None'; IsDsIntegrated = $true } } -ParameterFilter { $Name -eq '20.168.192.in-addr.arpa' }
+
+    $plaene = @(Get-DhcpReverseZonenPlan @(
+        [pscustomobject]@{ Netz = '192.168.10.0'; Praefix = 24 }
+        [pscustomobject]@{ Netz = '192.168.20.0'; Praefix = 24 }
+        [pscustomobject]@{ Netz = '192.168.30.0'; Praefix = 24 }
+        [pscustomobject]@{ Netz = '192.168.10.128'; Praefix = 25 }))
+
+    It 'plant jede Zone nur einmal' { $plaene.Count | Should Be 3 }
+    It 'erkennt vorhanden, unsicher und fehlend' {
+        ($plaene | Where-Object { $_.Zone -eq '10.168.192.in-addr.arpa' }).Art | Should Be 'Vorhanden'
+        ($plaene | Where-Object { $_.Zone -eq '20.168.192.in-addr.arpa' }).Art | Should Be 'Sicher'
+        ($plaene | Where-Object { $_.Zone -eq '30.168.192.in-addr.arpa' }).Art | Should Be 'Neu'
+    }
+}
+
+Describe 'Dienstkonto für DNS-Updates' {
+    $geheim = ConvertTo-SecureString 'Geheim!123xyz' -AsPlainText -Force
+    Mock Write-Host { }
+    Mock Add-Ergebnis { }
+    Mock Get-DhcpServerDnsCredential { [pscustomobject]@{ UserName = ''; DomainName = '' } }
+    Mock Read-Text { 'svc-dhcp-dns' }
+    Mock Read-JaNein { $true }
+    Mock Get-ADUser { $null }
+    Mock Test-SamVorhanden { $false }
+    Mock Read-Passwort { $geheim }
+    Mock New-ADUser { [pscustomobject]@{ DistinguishedName = 'CN=svc-dhcp-dns,CN=Users,DC=firma,DC=local' } }
+    Mock Set-DhcpServerDnsCredential { }
+    $Domain = [pscustomobject]@{ DNSRoot = 'firma.local'; NetBIOSName = 'FIRMA'; UsersContainer = 'CN=Users,DC=firma,DC=local'; DistinguishedName = 'DC=firma,DC=local' }
+
+    $konto = Read-DhcpDnsKonto
+    Set-DhcpDnsKonto $konto
+
+    It 'legt ein neues Konto an, dessen Passwort nicht abläuft' {
+        $konto.Neu | Should Be $true
+        Assert-MockCalled New-ADUser -Times 1 -Exactly -ParameterFilter {
+            $SamAccountName -eq 'svc-dhcp-dns' -and $PasswordNeverExpires -eq $true -and $Enabled -eq $true -and $Path -eq 'CN=Users,DC=firma,DC=local' -and $AccountPassword -is [securestring]
+        }
+    }
+    It 'hinterlegt das Konto bei DHCP' {
+        Assert-MockCalled Set-DhcpServerDnsCredential -Times 1 -Exactly -ParameterFilter {
+            $Credential.UserName -eq 'FIRMA\svc-dhcp-dns' -and $Credential.GetNetworkCredential().Password -eq 'Geheim!123xyz'
+        }
+    }
+    It 'schreibt das Passwort nirgends ins Protokoll' {
+        Assert-MockCalled Add-Ergebnis -Times 0 -Exactly -ParameterFilter { "$Typ $Name $DN $Status $Info $Bezug" -match 'Geheim' }
+        Assert-MockCalled Add-Ergebnis -ParameterFilter { $Typ -eq 'DHCP-DNS-Konto' -and $Status -eq 'OK' -and $Info -match 'nicht protokolliert' }
+    }
+    It 'enthält kein Passwort im Code des Teilmoduls' {
+        $code = [System.IO.File]::ReadAllText((Join-Path (Join-Path (Join-Path $wurzel 'src') 'Module') 'DHCP.psm1'))
+        $code | Should Not Match 'ConvertTo-SecureString'
+        $code | Should Not Match 'AsPlainText'
+    }
+}
+
+Describe 'Get-DhcpLeaseDnsStand' {
+    Mock Get-DnsServerResourceRecord { @() }
+    Mock Get-DnsServerResourceRecord { @([pscustomobject]@{ HostName = 'pc01'; RecordData = [pscustomobject]@{ IPv4Address = '192.168.10.101' } }) } -ParameterFilter { $ZoneName -eq 'firma.local' -and $Name -eq 'pc01' -and $RRType -eq 'A' }
+    Mock Get-DnsServerResourceRecord { @([pscustomobject]@{ HostName = '101'; RecordData = [pscustomobject]@{ PtrDomainName = 'pc01.firma.local.' } }) } -ParameterFilter { $ZoneName -eq '10.168.192.in-addr.arpa' -and $Name -eq '101' -and $RRType -eq 'Ptr' }
+
+    $zeilen = @(Get-DhcpLeaseDnsStand @(
+        [pscustomobject]@{ IPAddress = '192.168.10.101'; HostName = 'pc01.firma.local' }
+        [pscustomobject]@{ IPAddress = '192.168.10.102'; HostName = 'pc02' }
+        [pscustomobject]@{ IPAddress = '192.168.10.103'; HostName = '' }) @('firma.local') @('10.168.192.in-addr.arpa'))
+
+    It 'prüft nur Leases mit Hostname' { $zeilen.Count | Should Be 2 }
+    It 'findet A und PTR' {
+        $zeilen[0].A | Should Be 'ja'
+        $zeilen[0].PTR | Should Be 'ja'
+    }
+    It 'meldet fehlende Einträge und ergänzt die Domäne bei kurzen Namen' {
+        $zeilen[1].Hostname | Should Be 'pc02.firma.local'
+        $zeilen[1].A | Should Be 'nein'
+        $zeilen[1].PTR | Should Be 'nein'
     }
 }
