@@ -4,14 +4,14 @@ Interaktives PowerShell-Script für Windows Server: OUs, Benutzer und Gruppen
 (inkl. AGDLP, Ordnerrechte und Freigaben) in Sekunden anlegen – mit Vorschau,
 CSV-Protokoll und Rückgängig-Funktion.
 
-- **Ein Ordner:** `src/` mit `AD-Schnellanlage.ps1` und den Teilmodulen in `Module\` (z. B. `GPO.psm1`), direkt auf den Server kopierbar
-- **Nur Bordmittel:** Windows PowerShell 5.1, Module `ActiveDirectory`, `DnsServer`, `GroupPolicy`, `ServerManager`, `SmbShare`, `DnsClient`, .NET, `Out-GridView` (falls vorhanden)
+- **Ein Ordner:** `src/` mit `AD-Schnellanlage.ps1` und den Teilmodulen in `Module\` (`GPO.psm1`, `DHCP.psm1`), direkt auf den Server kopierbar
+- **Nur Bordmittel:** Windows PowerShell 5.1, Module `ActiveDirectory`, `DnsServer`, `GroupPolicy`, `DhcpServer`, `ServerManager`, `SmbShare`, `NetTCPIP`, `DnsClient`, .NET, `Out-GridView` (falls vorhanden)
 - **Offline:** kein Internet, kein `Install-Module`, keine externen Programme
 
 ## Installation
 
 1. Den Inhalt von `src/` auf den Server kopieren (z. B. nach `C:\Scripts`), sodass dort
-   `AD-Schnellanlage.ps1` und der Ordner `Module` mit `GPO.psm1` liegen. Fehlt ein
+   `AD-Schnellanlage.ps1` und der Ordner `Module` mit `GPO.psm1` und `DHCP.psm1` liegen. Fehlt ein
    Teilmodul, startet das Script trotzdem – nur der zugehörige Menüpunkt fehlt dann.
 2. Optional: Voreinstellungen im Menü **[E]** ändern und speichern (landet in `Einstellungen.json`
    neben dem Script, Beispiel: `config/Einstellungen.example.json`) – oder direkt im Block
@@ -45,11 +45,12 @@ Für die AD-Punkte braucht es einen Domänencontroller oder das Windows-Feature
 | 8 | Rückgängig machen anhand des Protokolls (AD und DNS) |
 | D | DNS: Rolle installieren, Forward-/Reverse-Zonen, Einträge per Schnelleingabe mit automatischem PTR, fehlende PTR auffüllen (fehlende Reverse-Zonen gleich mit anlegen), Weiterleitungen, Namensauflösung testen |
 | G | Gruppenrichtlinien: GPO erstellen, Netzlaufwerk per GPO zuordnen (optional nur für eine Gruppe), Standard-Richtlinien (Systemsteuerung, Desktophintergrund, cmd, USB, Bildschirmsperre – erweiterbar), mit OU verknüpfen, anzeigen, entfernen |
+| H | DHCP: Einrichtungs-Assistent (Rolle, Autorisierung im AD, Server-Manager-Hinweis weg, Bereich mit Vorschlägen aus der Netzwerkkarte und Prüfungen), Reservierungen (MAC in jeder Schreibweise), Bereiche/Leases anzeigen, entfernen, alles aus einer Datei |
 | S | Subnetzrechner (IPv4): Maske, Netz, Broadcast, erster/letzter Host, Anzahl Hosts – braucht weder AD noch DNS |
 | E | Einstellungen: Präfixe, Namensmuster, Benutzer-Standards, DNS und Module ändern und dauerhaft speichern |
 | P | Protokoll der Sitzung anzeigen |
 
-Ausführliche Bedienung: [docs/Bedienung.md](docs/Bedienung.md) · DNS: [docs/DNS.md](docs/DNS.md) · Gruppenrichtlinien: [docs/GPO.md](docs/GPO.md) · Einstellungen: [docs/Einstellungen.md](docs/Einstellungen.md)
+Ausführliche Bedienung: [docs/Bedienung.md](docs/Bedienung.md) · DNS: [docs/DNS.md](docs/DNS.md) · Gruppenrichtlinien: [docs/GPO.md](docs/GPO.md) · DHCP: [docs/DHCP.md](docs/DHCP.md) · Einstellungen: [docs/Einstellungen.md](docs/Einstellungen.md)
 
 ## Entwicklung
 

@@ -1,0 +1,27 @@
+{
+  "_Hinweis": "Beispiel. Als DHCP-Konfiguration.json neben AD-Schnellanlage.ps1 legen und im Menü [H][7] laden. Weggelassene Werte kommen aus den Vorschlägen: ServerIp = aktive Netzwerkkarte, Maske 255.255.255.0, Start/Ende .100 bis .200, Router = erste Adresse im Netz, DnsServer = ServerIp, Domaene = AD-Domäne, LeaseTage 8. MAC-Adressen in beliebiger Schreibweise.",
+  "ServerIp": "192.168.10.10",
+  "DnsIntegration": true,
+  "Bereiche": [
+    {
+      "Name": "Clients",
+      "Netz": "192.168.10.0",
+      "Maske": "255.255.255.0",
+      "Start": "192.168.10.100",
+      "Ende": "192.168.10.200",
+      "Ausschluesse": ["192.168.10.150-192.168.10.155"],
+      "LeaseTage": 8,
+      "Router": "192.168.10.1",
+      "DnsServer": ["192.168.10.10"],
+      "Domaene": "firma.local",
+      "Reservierungen": [
+        { "Name": "Drucker01", "Ip": "192.168.10.120", "Mac": "00:11:22:AA:BB:CC", "Beschreibung": "Drucker Empfang" }
+      ]
+    },
+    {
+      "Name": "Gaeste",
+      "Netz": "192.168.20.0/24",
+      "LeaseTage": 1
+    }
+  ]
+}
