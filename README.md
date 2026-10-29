@@ -64,7 +64,7 @@ bei grüner CI.
 
 ## Projektstand
 
-Version **1.0.0** (Ausgangsstand). Änderungen siehe [CHANGELOG.md](CHANGELOG.md).
+Version **1.1.0** – DNS-Modul [D], Einstellungen [E], Start auch ohne Active Directory. Änderungen siehe [CHANGELOG.md](CHANGELOG.md).
 
 ## Lizenz
 
