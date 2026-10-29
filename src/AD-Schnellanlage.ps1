@@ -31,7 +31,7 @@
       [P] Protokoll der Sitzung anzeigen
 
 .NOTES
-    Version: 1.0.0
+    Version: 1.1.0
     Start:   powershell.exe -ExecutionPolicy Bypass -File .\AD-Schnellanlage.ps1
     AD-Funktionen brauchen einen Domaenencontroller oder das Windows-Feature
     "RSAT-AD-PowerShell". Ohne AD startet das Script trotzdem.
@@ -40,7 +40,7 @@
              dabei startet das Menue nicht.
 #>
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
 
 #region ======================= KONFIGURATION =======================
 # Alles in diesem Block darf angepasst werden. Einfacher: Menüpunkt [E] Einstellungen -
