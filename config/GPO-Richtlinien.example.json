@@ -1,0 +1,29 @@
+{
+  "_Hinweis": "Beispiel. Als GPO-Richtlinien.json neben AD-Schnellanlage.ps1 legen. Diese Vorlagen erscheinen unter [G][3] zusätzlich zu den eingebauten; gleicher Name ersetzt eine eingebaute. Schluessel beginnt mit HKCU\\ (Benutzer) oder HKLM\\ (Computer). Typ: String, ExpandString, DWord, QWord, MultiString (Teile mit |). {eingabe} wird durch die Antwort auf die Frage ersetzt (Art: Zahl, Pfad oder Text; bei Zahl optional Min, Max, Faktor).",
+  "Richtlinien": [
+    {
+      "Name": "Taskmanager",
+      "Text": "Task-Manager sperren",
+      "Werte": [
+        { "Schluessel": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "Name": "DisableTaskMgr", "Typ": "DWord", "Wert": "1" }
+      ]
+    },
+    {
+      "Name": "Registrierungseditor",
+      "Text": "Registrierungseditor (regedit) sperren",
+      "Werte": [
+        { "Schluessel": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "Name": "DisableRegistryTools", "Typ": "DWord", "Wert": "1" }
+      ]
+    },
+    {
+      "Name": "Anmeldehinweis",
+      "Text": "Hinweis vor der Anmeldung anzeigen",
+      "Hinweis": "Computerkonfiguration: die GPO mit der OU der Computer verknüpfen.",
+      "Eingabe": { "Frage": "Text des Hinweises", "Art": "Text", "Standard": "Nur für berechtigte Personen." },
+      "Werte": [
+        { "Schluessel": "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "Name": "legalnoticecaption", "Typ": "String", "Wert": "Hinweis" },
+        { "Schluessel": "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "Name": "legalnoticetext", "Typ": "String", "Wert": "{eingabe}" }
+      ]
+    }
+  ]
+}

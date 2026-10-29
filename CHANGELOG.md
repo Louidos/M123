@@ -6,7 +6,11 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
 ## Unveröffentlicht
 
+### Hinzugefügt
+- Hauptmenü [G] Gruppenrichtlinien per Menü anlegen: Netzlaufwerke einbinden (z. B. `H:` → `\\server\freigabe`, optional nur für eine Gruppe, fehlende Freigabe auf diesem Server gleich mit anlegen) und einfache Standard-Richtlinien setzen (Systemsteuerung, Desktophintergrund, Eingabeaufforderung, USB-Speicher, Bildschirmsperre – über `GPO-Richtlinien.json` erweiterbar); GPOs erstellen, mit OUs verknüpfen, anzeigen und entfernen. Nichts wird doppelt angelegt, am Ende kurzer Bericht und optional `Invoke-GPUpdate` (#11).
+
 ### Geändert
+- Installation: neben `AD-Schnellanlage.ps1` gehört jetzt der Ordner `Module` (Teilmodule wie `GPO.psm1`) – einfach den ganzen Inhalt von `src/` kopieren (#11).
 - Entwicklung: Die automatische Prüfung bei jedem Pull Request untersucht den Code zusätzlich mit PSScriptAnalyzer und prüft auch Teilmodule (`.psm1`, `.psd1`) auf Syntaxfehler und UTF-8 mit BOM (#10).
 
 ## 2.0.0 – 2026-10-29
