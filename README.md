@@ -70,7 +70,7 @@ bei grüner CI.
 
 ## Projektstand
 
-Version **2.0.0** – Subnetzrechner [S], fehlende Reverse-Zonen direkt beim PTR-Auffüllen anlegen, CSV-Import entfernt. Änderungen siehe [CHANGELOG.md](CHANGELOG.md).
+Version **2.1.0** – Gruppenrichtlinien [G] (Netzlaufwerke, Standard-Richtlinien), DHCP [H] als geführter Assistent mit AD-Autorisierung, Reservierungen und DNS-Integration. Änderungen siehe [CHANGELOG.md](CHANGELOG.md).
 
 ## Lizenz
 

@@ -6,6 +6,8 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
 ## Unveröffentlicht
 
+## 2.1.0 – 2026-10-29
+
 ### Hinzugefügt
 - Hauptmenü [G] Gruppenrichtlinien per Menü anlegen: Netzlaufwerke einbinden (z. B. `H:` → `\\server\freigabe`, optional nur für eine Gruppe, fehlende Freigabe auf diesem Server gleich mit anlegen) und einfache Standard-Richtlinien setzen (Systemsteuerung, Desktophintergrund, Eingabeaufforderung, USB-Speicher, Bildschirmsperre – über `GPO-Richtlinien.json` erweiterbar); GPOs erstellen, mit OUs verknüpfen, anzeigen und entfernen. Nichts wird doppelt angelegt, am Ende kurzer Bericht und optional `Invoke-GPUpdate` (#11).
 - Hauptmenü [H] DHCP: Einrichtung als geführter Assistent mit AD-Autorisierung (Rolle, Sicherheitsgruppen, Dienst-Neustart, Hinweis im Server-Manager verschwindet), Prüfungen (Netz, Grenzen, Router und Server-IP automatisch ausschließen, keine überlappenden Bereiche), Reservierungen (MAC in jeder Schreibweise), Übersicht über Bereiche, Leases und Reservierungen und Vorschlägen aus der Netzwerkkarte; ganze Konfiguration auch aus einer Datei (`DHCP-Konfiguration.json`) (#12).
