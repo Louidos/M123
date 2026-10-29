@@ -6,6 +6,9 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
 ## Unveröffentlicht
 
+### Geändert
+- Entwicklung: Die automatische Prüfung bei jedem Pull Request untersucht den Code zusätzlich mit PSScriptAnalyzer und prüft auch Teilmodule (`.psm1`, `.psd1`) auf Syntaxfehler und UTF-8 mit BOM (#10).
+
 ## 2.0.0 – 2026-10-29
 
 ### Hinzugefügt
